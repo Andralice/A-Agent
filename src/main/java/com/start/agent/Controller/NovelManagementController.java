@@ -177,11 +177,11 @@ public class NovelManagementController {
     }
 
     @PostMapping("/create")
-    public Map<String, Object> createNovel(@RequestBody CreateRequest request) {
-        log.info("【API请求】新建小说，题材: {}, 设定长度: {}", request.getTopic(), textLength(request.getGenerationSetting()));
+    public Map<String, Object> createNovel(@RequestBody(required = false) CreateRequest request) {
+        log.info("【API请求】新建小说，题材: {}, 设定长度: {}", request == null ? "未提供" : request.getTopic(), textLength(request == null ? null : request.getGenerationSetting()));
         Map<String, Object> result = new HashMap<>();
         try {
-            if (request.getTopic() == null || request.getTopic().trim().isEmpty()) {
+            if (request == null || request.getTopic() == null || request.getTopic().trim().isEmpty()) {
                 throw new IllegalArgumentException("题材不能为空");
             }
             CompletableFuture.runAsync(() -> agentService.processAndSend(0L, request.getTopic(), request.getGenerationSetting()));
@@ -195,11 +195,13 @@ public class NovelManagementController {
     }
 
     @PostMapping("/{novelId}/continue")
-    public Map<String, Object> continueNovel(@PathVariable Long novelId, @RequestBody ContinueRequest request) {
-        log.info("【API请求】续写小说 {}, 目标章节: {}, 设定长度: {}", novelId, request.getChapterNumber(), textLength(request.getGenerationSetting()));
+    public Map<String, Object> continueNovel(@PathVariable Long novelId, @RequestBody(required = false) ContinueRequest request) {
+        log.info("【API请求】续写小说 {}, 目标章节: {}, 设定长度: {}", novelId, request == null ? "自动下一章" : request.getChapterNumber(), textLength(request == null ? null : request.getGenerationSetting()));
         Map<String, Object> result = new HashMap<>();
         try {
-            CompletableFuture.runAsync(() -> agentService.continueChapter(0L, novelId.intValue(), request.getChapterNumber(), request.getGenerationSetting()));
+            Integer chapterNumber = request == null ? null : request.getChapterNumber();
+            String generationSetting = request == null ? null : request.getGenerationSetting();
+            CompletableFuture.runAsync(() -> agentService.continueChapter(0L, novelId.intValue(), chapterNumber, generationSetting));
             result.put("status", "success");
             result.put("message", "续写任务已启动，请通过进度接口轮询查看");
         } catch (Exception e) {
@@ -210,14 +212,36 @@ public class NovelManagementController {
     }
 
     @PostMapping("/{novelId}/auto-continue")
-    public Map<String, Object> autoContinueNovel(@PathVariable Long novelId, @RequestBody AutoContinueRequest request) {
-        log.info("【API请求】自动续写小说 {}, 目标章节数: {}, 设定长度: {}", novelId, request.getTargetChapterCount(), textLength(request.getGenerationSetting()));
+    public Map<String, Object> autoContinueNovel(@PathVariable Long novelId, @RequestBody(required = false) AutoContinueRequest request) {
+        log.info("【API请求】自动续写小说 {}, 目标章节数: {}, 设定长度: {}", novelId, request == null ? "默认" : request.getTargetChapterCount(), textLength(request == null ? null : request.getGenerationSetting()));
         Map<String, Object> result = new HashMap<>();
         try {
-            int targetChapterCount = request.getTargetChapterCount() == null ? 20 : request.getTargetChapterCount();
-            CompletableFuture.runAsync(() -> agentService.autoContinueChapter(0L, novelId.intValue(), targetChapterCount, request.getGenerationSetting()));
+            int targetChapterCount = request == null || request.getTargetChapterCount() == null ? 20 : request.getTargetChapterCount();
+            String generationSetting = request == null ? null : request.getGenerationSetting();
+            CompletableFuture.runAsync(() -> agentService.autoContinueChapter(0L, novelId.intValue(), targetChapterCount, generationSetting));
             result.put("status", "success");
             result.put("message", "自动续写任务已启动，请通过进度接口轮询查看");
+        } catch (Exception e) {
+            result.put("status", "error");
+            result.put("message", e.getMessage());
+        }
+        return result;
+    }
+
+    @PostMapping("/{novelId}/chapters/{chapterNumber}/regenerate")
+    public Map<String, Object> regenerateChapter(@PathVariable Long novelId, @PathVariable Integer chapterNumber, @RequestBody(required = false) RegenerateRequest request) {
+        log.info("【API请求】重新生成小说 {} 的第{}章，设定长度: {}", novelId, chapterNumber, textLength(request == null ? null : request.getGenerationSetting()));
+        Map<String, Object> result = new HashMap<>();
+        try {
+            if (chapterNumber <= 0) {
+                result.put("status", "error");
+                result.put("message", "章节号必须大于0");
+                return result;
+            }
+            String generationSetting = request == null ? null : request.getGenerationSetting();
+            CompletableFuture.runAsync(() -> agentService.regenerateChapter(0L, novelId.intValue(), chapterNumber, generationSetting));
+            result.put("status", "success");
+            result.put("message", "重新生成任务已启动，请通过进度接口轮询查看");
         } catch (Exception e) {
             result.put("status", "error");
             result.put("message", e.getMessage());
@@ -250,6 +274,11 @@ public class NovelManagementController {
     @Data
     static class AutoContinueRequest {
         private Integer targetChapterCount;
+        private String generationSetting;
+    }
+
+    @Data
+    static class RegenerateRequest {
         private String generationSetting;
     }
 }

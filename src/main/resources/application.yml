@@ -36,7 +36,7 @@ spring:
           model: glm-5.1
           temperature: 0.8
           max-tokens: 4096
-          timeout: 600s
+          timeout: 1800s
 
   task:
     scheduling:

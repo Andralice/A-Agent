@@ -23,10 +23,14 @@ public class NapCatMessageService {
         this.webSocketClient = client;
     }
 
+    public boolean isWebSocketConnected() {
+        return webSocketClient != null && webSocketClient.isOpen();
+    }
+
     public void sendGroupMessage(Long groupId, String message) {
-        if (webSocketClient == null || !webSocketClient.isOpen()) {
-            log.error("【❌ 发送失败】WebSocket连接未建立");
-            throw new RuntimeException("WebSocket连接未建立");
+        if (!isWebSocketConnected()) {
+            log.error("【❌ 发送失败】WebSocket连接未建立或已断开 - 群ID: {}", groupId);
+            throw new RuntimeException("WebSocket连接不可用，请检查NapCat服务状态");
         }
 
         try {

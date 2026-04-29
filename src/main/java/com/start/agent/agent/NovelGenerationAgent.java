@@ -22,7 +22,7 @@ public class NovelGenerationAgent {
         this.reviewAgent = reviewAgent;
         this.polishingAgent = polishingAgent;
         this.consistencyAgent = consistencyAgent;
-        log.info("【AI代理初始化】NovelGenerationAgent 已就绪 (多Agent协作模式 - 设定增强版)");
+        log.info("【AI代理初始化】NovelGenerationAgent 已就绪（生态型AI - 因果驱动版）");
     }
 
     public String generateOutline(String topic, String generationSetting) {
@@ -60,8 +60,7 @@ public class NovelGenerationAgent {
     public String generateChapter(String outline, int chapterNumber, String previousContent,
                                   String characterProfile, String previousChaptersSummary,
                                   String novelSetting, String chapterSetting) {
-        log.info("【📝 多Agent协作】开始第{}章创作，小说设定长度: {}，本章设定长度: {}",
-                chapterNumber, textLength(novelSetting), textLength(chapterSetting));
+        log.info("【📝 生态型AI】开始第{}章创作（因果驱动模式）", chapterNumber);
         long totalStartTime = System.currentTimeMillis();
 
         try {
@@ -104,13 +103,14 @@ public class NovelGenerationAgent {
         long startTime = System.currentTimeMillis();
 
         String prompt = String.format("""
-            你是一位精通网文节奏的顶级作家。
+            你是一位精通网文节奏的顶级作家，采用"生态型AI"创作模式。
 
             【重要要求】
             - 必须使用第三人称叙述，严禁使用第一人称。
-            - 不要出现“本章完”“未完待续”等字样。
-            - 保持与上一章、故事大纲、角色设定、用户设定一致。
-            - 如果本章设定与小说全局设定不冲突，优先落实本章设定。
+            - 不要出现"本章完""未完待续"等字样。
+            - 所有事件必须有明确的因果来源，不得凭空捏造巧合事件。
+            - 信息揭露必须符合延迟释放机制（每章最多揭露一个层级）。
+            - 人物行为必须符合其目标/恐惧/知识状态。
 
             【故事大纲】
             %s
@@ -141,7 +141,7 @@ public class NovelGenerationAgent {
             现在开始创作第%d章：
             """, outline, characterProfile, buildSettingBlock(novelSetting), buildChapterSettingBlock(chapterSetting), previousContent, chapterNumber);
 
-        return callAi(prompt, startTime, "第" + chapterNumber + "章初稿生成");
+        return callAi(prompt, startTime, "第" + chapterNumber + "章初稿生成（生态型）");
     }
 
     public String generateCharacterProfile(String topic, String generationSetting) {
@@ -162,6 +162,11 @@ public class NovelGenerationAgent {
             4. 设计1-2个对立角色，包含理念、冲突点、个人魅力、原则和底线。
             5. 给出角色互动关系图和叙述视角说明。
             6. 使用第三人称叙述说明。
+
+            【重要】每个角色必须明确标注：
+            - 目标（want）：角色最想要什么
+            - 恐惧（fear）：角色最怕什么
+            - 信息差（knowledge）：角色知道什么/不知道什么
 
             请直接输出角色档案：
             """, topic, buildSettingBlock(generationSetting));
