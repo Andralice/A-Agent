@@ -1,0 +1,62 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/novel_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&autoReconnect=true&failOverReadOnly=false&maxReconnects=10&initialTimeout=2&connectTimeout=10000&socketTimeout=30000
+    username: root
+    password: My$qlR00t#2026
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      initialization-fail-timeout: -1
+      validation-timeout: 5000
+      connection-test-query: SELECT 1
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  ai:
+    openai:
+      api-key: sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk
+      base-url: http://114.132.99.114:3000
+      chat:
+        options:
+          model: glm-5.1
+          temperature: 0.8
+          max-tokens: 4096
+          timeout: 600s
+
+  task:
+    scheduling:
+      pool:
+        size: 5
+
+napcat:
+  ws-url: ws://154.8.213.134:5701
+  access-token: "1-2VZwUL2;LvIXni"
+
+qq:
+  allowed-groups: 1103130289
+
+logging:
+  level:
+    com.start.agent: INFO
+    org.springframework.ai: INFO
+    com.zaxxer.hikari: WARN
+  file:
+    name: logs/novel-agent.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
