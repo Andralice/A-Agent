@@ -1,6 +1,7 @@
 package com.start.agent.agent;
 
 
+import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
@@ -74,6 +75,7 @@ public class ConsistencyReviewAgent {
                - 评估创新性是否提升了作品质量
                - 只有在确实违背设定时才修改
                - 鼓励独特的叙事角度和表达方式
+            %s
             
             【处理方式】
             
@@ -98,7 +100,8 @@ public class ConsistencyReviewAgent {
             6. 尊重作者的创新意图，不要过度标准化
             
             请返回审查修正后的内容：
-            """, outline, characterProfile, previousChaptersSummary, chapterNumber, content);
+            """, outline, characterProfile, previousChaptersSummary, chapterNumber, content,
+                NarrativeCraftPrompts.consistencyReviewNarrativeQualityBlock());
 
         log.debug("【🔍 一致性审查】提示词长度: {} 字符", prompt.length());
 

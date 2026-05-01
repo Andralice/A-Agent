@@ -18,12 +18,12 @@ public class ChapterFactService {
 
     @Transactional
     public void rebuildFactsForChapter(Long novelId, Integer chapterNumber, String content, List<String> lockedNames) {
-        rebuildFactsForChapter(novelId, chapterNumber, content, lockedNames, List.of(), null);
+        rebuildFactsForChapter(novelId, chapterNumber, content, lockedNames, List.of(), null, List.of());
     }
 
     @Transactional
     public void rebuildFactsForChapter(Long novelId, Integer chapterNumber, String content, List<String> lockedNames,
-                                       List<String> sidecarFacts, String continuityAnchor) {
+                                       List<String> sidecarFacts, String continuityAnchor, List<String> sidecarEntities) {
         chapterFactRepository.deleteByNovelIdAndChapterNumber(novelId, chapterNumber);
         List<ChapterFact> facts = extractFacts(novelId, chapterNumber, content, lockedNames);
         for (String sidecarFact : sidecarFacts) {
@@ -44,6 +44,16 @@ public class ChapterFactService {
             anchor.setSubjectName("anchor");
             anchor.setFactContent(clip(continuityAnchor, 200));
             facts.add(anchor);
+        }
+        for (String entity : sidecarEntities) {
+            if (entity == null || entity.isBlank()) continue;
+            ChapterFact e = new ChapterFact();
+            e.setNovelId(novelId);
+            e.setChapterNumber(chapterNumber);
+            e.setFactType("sidecar_entity");
+            e.setSubjectName(entity.trim());
+            e.setFactContent("present");
+            facts.add(e);
         }
         for (ChapterFact fact : facts) {
             chapterFactRepository.save(fact);

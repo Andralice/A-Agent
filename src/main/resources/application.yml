@@ -5,7 +5,7 @@ spring:
   datasource:
     url: jdbc:mysql://localhost:3306/novel_agent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&autoReconnect=true&failOverReadOnly=false&maxReconnects=10&initialTimeout=2&connectTimeout=10000&socketTimeout=30000
     username: root
-    password: "My$qlR00t#2026"
+    password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       minimum-idle: 5
@@ -29,8 +29,8 @@ spring:
 
   ai:
     openai:
-      api-key: sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk
-      base-url: http://114.132.99.114:3000
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:http://114.132.99.114:3000}
       chat:
         options:
           model: glm-5.1
@@ -45,7 +45,7 @@ spring:
 
 napcat:
   ws-url: ws://154.8.213.134:5701
-  access-token: "1-2VZwUL2;LvIXni"
+  access-token: ${NAPCAT_ACCESS_TOKEN:}
 
 qq:
   allowed-groups: 1103130289
@@ -59,6 +59,7 @@ logging:
   level:
     com.start.agent: INFO
     org.springframework.ai: INFO
+    org.springframework.ai.retry: ERROR
     com.zaxxer.hikari: WARN
   file:
     name: logs/novel-agent.log

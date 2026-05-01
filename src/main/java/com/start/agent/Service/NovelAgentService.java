@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.agent.model.Chapter;
 import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.Novel;
+import com.start.agent.model.NovelWritePhase;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.repository.ChapterRepository;
 import com.start.agent.repository.NovelRepository;
@@ -38,6 +39,8 @@ public class NovelAgentService {
     private final ChapterFactService chapterFactService;
     private final PlotSnapshotService plotSnapshotService;
     private final RegenerationTaskGuardService regenerationTaskGuardService;
+    private final WritingProgressService writingProgressService;
+    private final NewCharacterIngestService newCharacterIngestService;
     private final NovelMessageFormatter novelMessageFormatter;
     private final NovelExportService novelExportService;
     private final int defaultAutoContinueTarget;
@@ -51,6 +54,8 @@ public class NovelAgentService {
                              ConsistencyAlertService consistencyAlertService, ChapterFactService chapterFactService,
                              PlotSnapshotService plotSnapshotService,
                              RegenerationTaskGuardService regenerationTaskGuardService,
+                             WritingProgressService writingProgressService,
+                             NewCharacterIngestService newCharacterIngestService,
                              @Value("${novel.auto-continue.default-target:20}") int defaultAutoContinueTarget,
                              @Value("${novel.auto-continue.max-target:200}") int maxAutoContinueTarget,
                              NovelMessageFormatter novelMessageFormatter, NovelExportService novelExportService,
@@ -68,6 +73,8 @@ public class NovelAgentService {
         this.chapterFactService = chapterFactService;
         this.plotSnapshotService = plotSnapshotService;
         this.regenerationTaskGuardService = regenerationTaskGuardService;
+        this.writingProgressService = writingProgressService;
+        this.newCharacterIngestService = newCharacterIngestService;
         this.defaultAutoContinueTarget = Math.max(1, defaultAutoContinueTarget);
         this.maxAutoContinueTarget = Math.max(this.defaultAutoContinueTarget, Math.max(1, maxAutoContinueTarget));
         this.novelMessageFormatter = novelMessageFormatter;
@@ -86,6 +93,7 @@ public class NovelAgentService {
         try {
             Novel novel = createNovel(groupId, topic, setting, pipeline);
             novelId = novel.getId();
+            writingProgressService.beginOperation(novelId, NovelWritePhase.INITIAL_BOOTSTRAP, 1, INIT_CHAPTERS);
             WritingPipeline effectivePipeline = resolvePipeline(novel);
             String outline = generationAgent.generateOutline(topic, setting, effectivePipeline);
             String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline);
@@ -106,6 +114,54 @@ public class NovelAgentService {
             log.error("create novel failed", e);
             generationLogService.saveGenerationLog(novelId, null, "error", 0, 0, "failed", e.getMessage());
             safeSend(groupId, "Novel generation failed: " + e.getMessage());
+        } finally {
+            if (novelId != null) {
+                try {
+                    writingProgressService.finishOperation(novelId);
+                } catch (Exception ex) {
+                    log.warn("初创建工作台收尾失败 novelId={}", novelId, ex);
+                }
+            }
+        }
+    }
+
+    /**
+     * 可恢复新建：补齐大纲、角色设定与前若干章（幂等：已存在则跳过）。
+     * 由 generation_task(INITIAL_BOOTSTRAP) 驱动。
+     */
+    public void bootstrapNovel(Long groupId, Long novelId, int targetChapters) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new IllegalArgumentException("novel not found: " + novelId));
+        int target = Math.max(1, targetChapters);
+        WritingPipeline pipeline = resolvePipeline(novel);
+        String setting = novel.getGenerationSetting();
+
+        // Outline
+        boolean outlineReady = novel.getDescription() != null && !novel.getDescription().isBlank()
+                && !"AI generated novel".equals(novel.getDescription()) && !"AI生成的爽文小说".equals(novel.getDescription());
+        if (!outlineReady) {
+            String outline = generationAgent.generateOutline(novel.getTopic(), setting, pipeline);
+            generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
+            updateNovelDescription(novelId, outline);
+        }
+
+        // Profiles
+        if (!characterProfileService.hasUsableProfiles(novelId)) {
+            String profile = generationAgent.generateCharacterProfile(novel.getTopic(), setting, pipeline);
+            int savedProfiles = persistCharacterProfilesStrict(novelId, novel.getTopic(), setting, pipeline, profile);
+            generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
+                    savedProfiles > 0 ? "success" : "failed",
+                    savedProfiles > 0 ? null : "strict json parse failed");
+        }
+
+        // Chapters
+        List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novelId);
+        Set<Integer> exists = new HashSet<>();
+        for (Chapter c : chapters) if (c != null && c.getChapterNumber() != null) exists.add(c.getChapterNumber());
+        for (int i = 1; i <= target; i++) {
+            if (exists.contains(i)) continue;
+            Chapter chapter = gen(novel, i, setting, null);
+            userStatisticsService.updateGroupStatistics(novel.getGroupId(), 1, len(chapter.getContent()), false);
+            safeSend(novel.getGroupId(), novelMessageFormatter.formatNovelMessage(novel, chapter));
         }
     }
 
@@ -116,39 +172,62 @@ public class NovelAgentService {
     }
 
     private void continueChapterInternal(Long groupId, Integer novelId, Integer requestedChapter, String chapterSetting, boolean useTaskGuard) {
+        boolean locked = false;
+        boolean persistedWorkbench = false;
+        Long persistedNovelPk = novelId == null ? null : novelId.longValue();
+        int targetChapterNum = -1;
         try {
             Optional<Novel> opt = resolve(groupId, novelId);
             if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
+            persistedNovelPk = novel.getId();
             List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
-            int num = requestedChapter == null ? chapters.size() + 1 : requestedChapter;
-            Optional<Chapter> old = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num);
+            targetChapterNum = requestedChapter == null ? chapters.size() + 1 : requestedChapter;
+            Optional<Chapter> old = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), targetChapterNum);
             if (old.isPresent()) { safeSend(groupId, novelMessageFormatter.formatExistingChapter(old.get())); return; }
-            if (useTaskGuard && !regenerationTaskGuardService.tryAcquireRange(novel.getId(), num, num)) {
+            if (useTaskGuard && !regenerationTaskGuardService.tryAcquireRange(novel.getId(), targetChapterNum, targetChapterNum)) {
                 safeSend(groupId, "该章节正在重生/续写中，请稍后重试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
                 return;
             }
-            try {
-                Chapter chapter = gen(novel, num, novel.getGenerationSetting(), chapterSetting);
-                userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
-                safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
-            } finally {
-                if (useTaskGuard) regenerationTaskGuardService.releaseRange(novel.getId(), num, num);
+            locked = useTaskGuard;
+            if (useTaskGuard) {
+                writingProgressService.beginOperation(novel.getId(), NovelWritePhase.SINGLE_CONTINUE, targetChapterNum, targetChapterNum);
+                persistedWorkbench = true;
             }
+            Chapter chapter = gen(novel, targetChapterNum, novel.getGenerationSetting(), chapterSetting);
+            userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
+            safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
         } catch (Exception e) {
             log.error("continue failed", e);
-            generationLogService.saveGenerationLog(novelId == null ? null : novelId.longValue(), requestedChapter, "chapter", 0, 0, "failed", e.getMessage());
+            generationLogService.saveGenerationLog(persistedNovelPk, requestedChapter, "chapter", 0, 0, "failed", e.getMessage());
             safeSend(groupId, "Chapter generation failed: " + e.getMessage());
+        } finally {
+            try {
+                if (locked && persistedNovelPk != null && targetChapterNum > 0) {
+                    regenerationTaskGuardService.releaseRange(persistedNovelPk, targetChapterNum, targetChapterNum);
+                }
+                if (persistedWorkbench && persistedNovelPk != null) {
+                    writingProgressService.finishOperation(persistedNovelPk);
+                }
+            } catch (Exception ex) {
+                log.warn("续写收尾失败 novelId={} chapter={}", persistedNovelPk, targetChapterNum, ex);
+            }
         }
     }
 
     public void autoContinueChapter(Long groupId, Integer novelId, Integer targetChapterCount) { autoContinueChapter(groupId, novelId, targetChapterCount, null); }
 
     public void autoContinueChapter(Long groupId, Integer novelId, Integer targetChapterCount, String chapterSetting) {
+        boolean lockedRange = false;
+        boolean persistedWorkbench = false;
+        Long nid = null;
+        int rangeFrom = 0;
+        int rangeTo = 0;
         try {
             Optional<Novel> opt = resolve(groupId, novelId);
             if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
+            nid = novel.getId();
             int current = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId()).size();
             int target = targetChapterCount == null ? defaultAutoContinueTarget : targetChapterCount;
             if (target <= current) {
@@ -159,19 +238,32 @@ public class NovelAgentService {
                 safeSend(groupId, "目标章节数超过安全上限（最大: " + maxAutoContinueTarget + "），请分批续写。");
                 return;
             }
-            int from = current + 1;
-            if (!regenerationTaskGuardService.tryAcquireRange(novel.getId(), from, target)) {
+            rangeFrom = current + 1;
+            rangeTo = target;
+            if (!regenerationTaskGuardService.tryAcquireRange(novel.getId(), rangeFrom, rangeTo)) {
                 safeSend(groupId, "目标区间存在进行中的写入任务，请稍后再试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
                 return;
             }
-            try {
-                for (int i = from; i <= target; i++) continueChapterInternal(groupId, novel.getId().intValue(), i, chapterSetting, false);
-            } finally {
-                regenerationTaskGuardService.releaseRange(novel.getId(), from, target);
+            lockedRange = true;
+            writingProgressService.beginOperation(novel.getId(), NovelWritePhase.AUTO_CONTINUE_RANGE, rangeFrom, rangeTo);
+            persistedWorkbench = true;
+            for (int i = rangeFrom; i <= rangeTo; i++) {
+                continueChapterInternal(groupId, novel.getId().intValue(), i, chapterSetting, false);
             }
         } catch (Exception e) {
             log.error("auto continue failed", e);
             safeSend(groupId, "Auto continue failed: " + e.getMessage());
+        } finally {
+            try {
+                if (lockedRange && nid != null && rangeFrom > 0 && rangeTo >= rangeFrom) {
+                    regenerationTaskGuardService.releaseRange(nid, rangeFrom, rangeTo);
+                }
+                if (persistedWorkbench && nid != null) {
+                    writingProgressService.finishOperation(nid);
+                }
+            } catch (Exception ex) {
+                log.warn("自动续写收尾失败 novelId={} range={}-{}", nid, rangeFrom, rangeTo, ex);
+            }
         }
     }
 
@@ -197,12 +289,18 @@ public class NovelAgentService {
                 return;
             }
             try {
+                writingProgressService.beginOperation(novel.getId(), NovelWritePhase.REGENERATING_RANGE, from, to);
                 for (int chapterNum = from; chapterNum <= to; chapterNum++) {
                     Chapter chapter = gen(novel, chapterNum, novel.getGenerationSetting(), newSetting);
                     safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
                 }
                 safeSend(groupId, "区间重生完成: 第" + from + "章 到 第" + to + "章");
             } finally {
+                try {
+                    writingProgressService.finishOperation(novel.getId());
+                } catch (Exception ex) {
+                    log.warn("区间重生工作台收尾失败 novelId={}", novel.getId(), ex);
+                }
                 regenerationTaskGuardService.releaseRange(novel.getId(), from, to);
             }
         } catch (Exception e) {
@@ -216,6 +314,8 @@ public class NovelAgentService {
     }
 
     public void repairCharacterProfiles(Long groupId, Integer novelId, CharacterRepairOptions options) {
+        boolean persistedRepairBench = false;
+        Long nid = null;
         try {
             Optional<Novel> opt = resolve(groupId, novelId);
             if (opt.isEmpty()) {
@@ -223,12 +323,16 @@ public class NovelAgentService {
                 return;
             }
             Novel novel = opt.get();
+            nid = novel.getId();
             CharacterRepairOptions effectiveOptions = options == null ? CharacterRepairOptions.simple(false) : options;
             boolean hasUsableProfiles = characterProfileService.hasUsableProfiles(novel.getId());
             if (hasUsableProfiles && !effectiveOptions.forceRegenerate) {
                 safeSend(groupId, "角色设定已存在并可用，已执行脏数据修复，无需重建。");
                 return;
             }
+
+            writingProgressService.beginOperation(nid, NovelWritePhase.CHARACTER_MAINTENANCE, null, null);
+            persistedRepairBench = true;
 
             WritingPipeline pipeline = resolvePipeline(novel);
             boolean repaired = false;
@@ -263,6 +367,14 @@ public class NovelAgentService {
             log.error("repair character profiles failed", e);
             generationLogService.saveGenerationLog(novelId == null ? null : novelId.longValue(), null, "character_profile_repair", 0, 0, "failed", e.getMessage());
             safeSend(groupId, "角色设定修复失败: " + e.getMessage());
+        } finally {
+            if (persistedRepairBench && nid != null) {
+                try {
+                    writingProgressService.finishOperation(nid);
+                } catch (Exception ex) {
+                    log.warn("角色修复工作台收尾失败 novelId={}", nid, ex);
+                }
+            }
         }
     }
 
@@ -290,6 +402,16 @@ public class NovelAgentService {
     }
 
     private Chapter gen(Novel novel, int num, String novelSetting, String chapterSetting) {
+        Long novelPk = novel.getId();
+        writingProgressService.onChapterGenerationStart(novelPk, num);
+        try {
+            return genInner(novel, num, novelSetting, chapterSetting);
+        } finally {
+            writingProgressService.onChapterGenerationEnd(novelPk, num);
+        }
+    }
+
+    private Chapter genInner(Novel novel, int num, String novelSetting, String chapterSetting) {
         String profile = characterProfileService.getStableCharacterProfileBlock(novel.getId());
         List<Chapter> allChapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
         String previousContent = num <= 1 ? "" : chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num - 1).map(Chapter::getContent).orElse("");
@@ -347,8 +469,11 @@ public class NovelAgentService {
                 draft.content,
                 lockedNames,
                 sidecar == null ? List.of() : sidecar.facts,
-                sidecar == null ? null : sidecar.continuityAnchor
+                sidecar == null ? null : sidecar.continuityAnchor,
+                sidecar == null ? List.of() : sidecar.entities
         );
+        // 自动补全“近期多次出现”的新角色设定（扩展层）
+        newCharacterIngestService.maybeIngest(novel.getId(), num, lockedNames);
         plotSnapshotService.refreshSnapshotIfNeeded(novel.getId(), num, lockedNames);
         generationLogService.saveGenerationLog(novel.getId(), num, "chapter", len(draft.content), 0, "success", null);
         return saveChapter(novel.getId(), num, draft.title, draft.content, chapterSetting);
@@ -479,6 +604,14 @@ public class NovelAgentService {
             sidecar.title = sanitizeShort(root.path("title").asText(null), 60);
             sidecar.continuityAnchor = sanitizeShort(root.path("continuity_anchor").asText(null), 200);
             sidecar.facts = new ArrayList<>();
+            sidecar.entities = new ArrayList<>();
+            JsonNode entitiesNode = root.path("entities");
+            if (entitiesNode.isArray()) {
+                for (JsonNode node : entitiesNode) {
+                    String name = sanitizeShort(node.asText(null), 60);
+                    if (name != null && !name.isBlank()) sidecar.entities.add(name);
+                }
+            }
             JsonNode factsNode = root.path("facts");
             if (factsNode.isArray()) {
                 for (JsonNode node : factsNode) {
@@ -542,6 +675,7 @@ public class NovelAgentService {
         private String title;
         private String continuityAnchor;
         private List<String> facts;
+        private List<String> entities;
     }
 
     public static class CharacterRepairOptions {

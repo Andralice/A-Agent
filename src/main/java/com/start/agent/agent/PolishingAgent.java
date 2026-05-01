@@ -1,6 +1,7 @@
 
 package com.start.agent.agent;
 
+import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
@@ -69,6 +70,8 @@ public class PolishingAgent {
                - 例子：他点了点头。至于为什么，他没有再想。
                - **行动**：检查每段结尾，删掉所有升华意义的句子，留给读者补完。
             
+            %s
+            
             【执行策略】
             - 不要改变核心剧情和爽点结构。
             - **删掉 20%% 的废话句子**。
@@ -77,7 +80,7 @@ public class PolishingAgent {
             - 保持第三人称叙述。
             
             请返回改造后的完整内容，让它看起来**不像 AI 写的**：
-            """, outline, chapterNumber, content);
+            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendum());
 
         log.debug("【✨ 润色优化】提示词长度: {} 字符", prompt.length());
 

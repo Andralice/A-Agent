@@ -29,11 +29,27 @@ public class Chapter {
     @Column(name = "generation_setting", columnDefinition = "TEXT")
     private String generationSetting;
 
+    /** {@link ChapterWriteState}（库表默认 READY，兼容旧数据行）。 */
+    @Column(name = "write_state", nullable = false, length = 48, columnDefinition = "varchar(48) NOT NULL DEFAULT 'READY'")
+    private String writeState = ChapterWriteState.READY.name();
+
+    @Column(name = "write_state_updated_at")
+    private LocalDateTime writeStateUpdatedAt;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 
     @PrePersist
     protected void onCreate() {
         createTime = LocalDateTime.now();
+        if (writeState == null || writeState.isBlank()) {
+            writeState = ChapterWriteState.READY.name();
+        }
+        writeStateUpdatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onChapterPersistUpdate() {
+        writeStateUpdatedAt = LocalDateTime.now();
     }
 }

@@ -1,6 +1,7 @@
 package com.start.agent.agent;
 
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
@@ -46,6 +47,8 @@ public class NovelGenerationAgent {
             5. 使用第三人称叙述，严禁第一人称。
             6. 必须优先遵守用户提供的设定，不能与设定冲突；设定不足处再自由发挥。
 
+            %s
+
             【文风流水线】
             %s
 
@@ -56,7 +59,7 @@ public class NovelGenerationAgent {
             - 对立角色
             - 剧情规划
             - 写作风格要求
-            """, topic, settingBlock, styleGuide(pipeline));
+            """, topic, settingBlock, NarrativeCraftPrompts.outlineAntiTropeBlock(), styleGuide(pipeline));
 
         return callAi(prompt, startTime, "大纲生成");
     }
@@ -126,6 +129,8 @@ public class NovelGenerationAgent {
             - 信息揭露必须符合延迟释放机制（每章最多揭露一个层级）。
             - 人物行为必须符合其目标/恐惧/知识状态。
 
+            %s
+
             【故事大纲】
             %s
 
@@ -150,7 +155,7 @@ public class NovelGenerationAgent {
             【本章创作结构】
             1. 钩子：开篇给出危机、异常、压迫、误解或悬念。
             2. 压制：制造情绪下沉，让主角面对困难或不公平。
-            3. 反转触发：通过能力、信息、选择或人物关系产生反转。
+            3. 反转触发：用**情节层面的变化**制造跌宕（局势改写、信息翻盘、关键选择及后果、关系破裂或结盟等），至少一处要落在具体事件上；勿用密集「然而/其实/并非而是」类旁白句式替真正的剧情反转。
             4. 高潮爆发：让冲突集中释放，节奏加快，情绪拉满。
             5. 余震：留下后续悬念，不要总结人生意义。
 
@@ -164,7 +169,16 @@ public class NovelGenerationAgent {
             - 中间章节重生时，严禁推翻下一章已确定的关键事实（人物生死、地点、关键道具归属、阵营关系）。
 
             现在开始创作第%d章：
-            """, outline, characterProfile, buildImmutableConstraintsBlock(immutableConstraints), buildSettingBlock(novelSetting), buildChapterSettingBlock(chapterSetting), styleGuide(pipeline), previousContent, buildNextChapterBlock(nextContent), chapterNumber);
+            """, NarrativeCraftPrompts.chapterDraftHardRules(),
+                outline,
+                characterProfile,
+                buildImmutableConstraintsBlock(immutableConstraints),
+                buildSettingBlock(novelSetting),
+                buildChapterSettingBlock(chapterSetting),
+                styleGuide(pipeline),
+                previousContent,
+                buildNextChapterBlock(nextContent),
+                chapterNumber);
 
         return callAi(prompt, startTime, "第" + chapterNumber + "章初稿生成（生态型）");
     }
@@ -327,12 +341,13 @@ public class NovelGenerationAgent {
             2. 保留关键剧情与角色关系，不新增设定。
             3. 避免反复使用相同句式（如“他以为……他错了”）。
             4. 保持自然表达和人物个性化对白。
+            %s
 
             【原文】
             %s
 
             请返回最终正文，不要解释。
-            """, chapterNumber, pipeline.name(), content);
+            """, chapterNumber, pipeline == null ? WritingPipeline.POWER_FANTASY.name() : pipeline.name(), NarrativeCraftPrompts.deAiNarrativeFocusBlock(), content);
         return callAi(prompt, startTime, "终稿去AI味");
     }
 

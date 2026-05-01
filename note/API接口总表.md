@@ -32,11 +32,20 @@
 - `STYLE_CONTINUE_TASK_FAILED`: 文风续写任务失败
 - `CHARACTER_REPAIR_TASK_FAILED`: 角色修复任务失败
 - `TASK_CONFLICT`: 目标章节或区间已有进行中的重生/续写任务
+- `TASK_NOT_FOUND`: 任务不存在
+- `TASK_CANCEL_FAILED`: 任务取消失败（任务不存在或已完成）
+- `TASK_RETRY_FAILED`: 任务重试失败（仅 FAILED/CANCELLED 可重试）
+- `TASK_KICK_FAILED`: 手动触发执行失败（仅 PENDING 可 kick）
 
 前端建议：
 - `status=success && code=OK` 视为成功
 - 其他情况全部走错误流程，优先展示 `message`
 - 若 `code=TASK_CONFLICT`，提示用户稍后重试，并刷新 `regeneration-tasks`
+
+`TASK_CONFLICT` 触发规则（重要）：
+- 后端已启用**数据库级任务锁**（基于 `generation_task`），跨实例生效（本地/云端共享同库也生效）。
+- 只要目标小说存在 `PENDING` 或 `RUNNING` 且与本次请求章节区间重叠的任务，就会拒绝新任务。
+- 因此同一本小说同一区间不会被两个实例并发写入，避免章节互相覆盖。
 
 ## AI输出结构化策略（已执行）
 
@@ -206,6 +215,8 @@
   - `charactersReady`
   - `chapterCount`
   - `failedCount`
+  - `writePhase` / `isBusyPersisted` / `writeCursorChapter` / `writeRangeFrom` / `writeRangeTo`
+    - 用于展示“小说是否正在续写/重写”的持久化工作台状态
 
 ### 15. 获取创作全过程
 - 方法: `GET`
@@ -226,6 +237,12 @@
 - 字段说明:
   - `topic` (String, 必填)
   - `generationSetting` (String, 可选)
+- 返回新增字段:
+  - `novelId`: 新建小说 ID（立即落库）
+  - `taskId`: 可恢复任务 ID
+  - `taskType`: `INITIAL_BOOTSTRAP`
+  
+> 说明：该任务可在进程重启后继续执行（任务入库 `generation_task`）。
 
 ### 17. 续写章节
 - 方法: `POST`
@@ -241,6 +258,11 @@
 - 字段说明:
   - `chapterNumber` (Integer, 可选，不传=自动下一章)
   - `generationSetting` (String, 可选)
+- 返回新增字段:
+  - `taskId`: 持久化任务 ID（可用于重启后继续追踪）
+  - `taskType`: `CONTINUE_SINGLE`
+- 并发规则:
+  - 若该章已被其他 `PENDING/RUNNING` 任务占用，会返回 `TASK_CONFLICT`
 
 ### 18. 自动续写到目标章节
 - 方法: `POST`
@@ -258,6 +280,12 @@
     - 不传时使用后端配置 `novel.auto-continue.default-target`
     - 不能超过 `novel.auto-continue.max-target`
   - `generationSetting` (String, 可选)
+- 返回新增字段:
+  - `taskId`
+  - `taskType`: `AUTO_CONTINUE_RANGE`
+  - `rangeFrom` / `rangeTo`
+- 并发规则:
+  - 若目标区间与任一活跃任务区间重叠，会返回 `TASK_CONFLICT`
 
 ### 19. 重生某一章
 - 方法: `POST`
@@ -269,6 +297,12 @@
   "generationSetting": "可选，本章重生附加设定"
 }
 ```
+- 返回新增字段:
+  - `taskId`
+  - `taskType`: `REGENERATE_RANGE`
+  - `targetChapter`
+- 并发规则:
+  - 若目标章节已被活跃任务占用，会返回 `TASK_CONFLICT`
 
 ### 20. 导出小说（文本）
 - 方法: `GET`
@@ -299,6 +333,11 @@
   - 支持 `startChapter > endChapter`，后端会自动归一化。
   - 如果提交区间与正在重生的区间重叠，后端会拒绝该请求（防误触/重复任务）。
   - 每章重生后都会更新事实表；每 5 章节点会刷新阶段快照。
+- 返回新增字段:
+  - `taskId`
+  - `taskType`: `REGENERATE_RANGE`
+- 并发规则:
+  - 若目标区间与活跃任务区间重叠，会返回 `TASK_CONFLICT`
 
 ### 23. 查询区间重生任务状态
 - 方法: `GET`
@@ -309,9 +348,58 @@
 {
   "novelId": 1,
   "hasRunningTask": true,
-  "runningRanges": ["12-20"]
+  "runningRanges": ["12-20"],
+  "persistedWorkbench": {
+    "writePhase": "REGENERATING_RANGE",
+    "writeRangeFrom": 12,
+    "writeRangeTo": 20,
+    "writeCursorChapter": 14,
+    "isBusyPersisted": true
+  }
 }
 ```
+
+### 24. 获取写作监控聚合（推荐前端主看）
+- 方法: `GET`
+- 路径: `/api/novel/{novelId}/writing-monitor`
+- 作用: 同时返回
+  - DB 持久化工作台（小说级状态）
+  - 内存任务锁区间（volatile guard）
+  - 非 `READY` 章节标记清单
+- 返回关键字段:
+  - `writePhase` / `writeCursorChapter` / `isBusyPersisted`
+  - `volatileGuardRanges`
+  - `chaptersWithActiveWriteMarks`
+
+### 25. 获取该小说的持久化任务列表
+- 方法: `GET`
+- 路径: `/api/novel/{novelId}/generation-tasks`
+- 作用: 查询本小说所有可恢复任务（按创建时间倒序）
+
+### 26. 查询单个任务详情
+- 方法: `GET`
+- 路径: `/api/novel/tasks/{taskId}`
+- 作用: 查询指定任务状态、区间、当前进度、错误信息等
+
+### 27. 取消任务
+- 方法: `POST`
+- 路径: `/api/novel/tasks/{taskId}/cancel`
+- 作用: 将任务标记为 `CANCELLED`，执行器每章前会检查并停止后续执行
+
+### 28. 重试任务
+- 方法: `POST`
+- 路径: `/api/novel/tasks/{taskId}/retry`
+- 作用: 将 `FAILED` / `CANCELLED` 任务重新置为 `PENDING` 并自动执行
+- 限制: `DONE` 任务不可重试
+- 额外限制:
+  - 若重试任务区间与其他活跃任务重叠，会返回 `TASK_CONFLICT`
+
+### 29. 手动触发 PENDING 任务执行
+- 方法: `POST`
+- 路径: `/api/novel/tasks/{taskId}/kick`
+- 作用: 运维兜底按钮：当任务处于 `PENDING` 但因进程重启/事务时序等原因未自动启动时，可手动 kick 一次
+- 失败返回:
+  - `TASK_KICK_FAILED`
 
 ---
 
@@ -380,6 +468,8 @@
 ```
 
 > 说明：文风会持久化在小说记录中；后续从普通续写接口进入也会沿用该小说的流水线。
+>
+> 补充：该接口返回也会包含 `taskId`，可直接接入通用任务监控组件。
 
 ---
 
@@ -419,8 +509,12 @@
 - 单章续写：`POST /api/novel/{novelId}/continue`
 - 自动续写：`POST /api/novel/{novelId}/auto-continue`
 - 提交后：
-  - toast “任务已启动”
-  - 每 2~3 秒轮询 `GET /api/novel/{novelId}/progress`
+  - toast “任务已启动（taskId=xxx）”
+  - 优先轮询 `GET /api/novel/tasks/{taskId}`
+  - 并行轮询 `GET /api/novel/{novelId}/writing-monitor` 展示章节占位与区间
+- 冲突处理：
+  - 若返回 `TASK_CONFLICT`，先刷新 `GET /api/novel/{novelId}/generation-tasks`
+  - 提示“已有任务占用目标章节/区间，请等待当前任务结束或取消后重试”
 
 4. **区间重生（关键）**
 - 提交前必须先调：`GET /api/novel/{novelId}/regeneration-tasks`
@@ -428,7 +522,11 @@
   - 阻止提交，提示“当前重生区间: ...”
 - 提交：`POST /api/novel/{novelId}/chapters/regenerate-range`
 - 提交后：
-  - 轮询 `regeneration-tasks`，直到 `hasRunningTask=false`
+  - 轮询 `GET /api/novel/tasks/{taskId}`，直到 `status in [DONE,FAILED,CANCELLED]`
+  - 并行轮询 `regeneration-tasks` / `writing-monitor`
+- 若返回 `TASK_CONFLICT`：
+  - 显示冲突提示并展示正在占用的任务（取 `generation-tasks` 列表中 `PENDING/RUNNING`）
+  - 提供“取消任务”（`POST /api/novel/tasks/{taskId}/cancel`）入口（仅在你有权限时开放）
   - 再刷新：
     - `GET /api/novel/{novelId}/chapters`
     - `GET /api/novel/{novelId}/chapter-facts`
@@ -456,4 +554,8 @@
 
 - `novel.auto-continue.default-target`: 自动续写默认目标章节数（未传目标时）
 - `novel.auto-continue.max-target`: 自动续写安全上限（防止误触发过大量生成）
+
+补充（任务恢复）：
+- 本版本支持任务入库与启动恢复（`generation_task`）。
+- 若应用重启，`PENDING/RUNNING` 任务会在启动后自动恢复执行。
 

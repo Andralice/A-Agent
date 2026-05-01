@@ -1,7 +1,9 @@
 package com.start.agent.controller;
 
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.model.GenerationTask;
 import com.start.agent.service.NovelAgentService;
+import com.start.agent.service.GenerationTaskService;
 import com.start.agent.service.RegenerationTaskGuardService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -18,10 +20,14 @@ import java.util.concurrent.CompletableFuture;
 public class NovelStyleController {
     private final NovelAgentService agentService;
     private final RegenerationTaskGuardService regenerationTaskGuardService;
+    private final GenerationTaskService generationTaskService;
 
-    public NovelStyleController(NovelAgentService agentService, RegenerationTaskGuardService regenerationTaskGuardService) {
+    public NovelStyleController(NovelAgentService agentService,
+                                RegenerationTaskGuardService regenerationTaskGuardService,
+                                GenerationTaskService generationTaskService) {
         this.agentService = agentService;
         this.regenerationTaskGuardService = regenerationTaskGuardService;
+        this.generationTaskService = generationTaskService;
     }
 
     @PostMapping("/{style}/create")
@@ -50,11 +56,14 @@ public class NovelStyleController {
                 return error("TASK_CONFLICT", "该章节已存在进行中的重生/续写任务，请稍后重试。");
             }
             String generationSetting = request == null ? null : request.getGenerationSetting();
-            CompletableFuture.runAsync(() -> agentService.continueChapter(0L, novelId.intValue(), chapterNumber, generationSetting));
+            GenerationTask task = generationTaskService.enqueueContinueTask(novelId, chapterNumber, generationSetting);
+            generationTaskService.executeAsync(task.getId());
             Map<String, Object> data = new HashMap<>();
             data.put("pipelineHint", WritingPipeline.fromPath(style).name());
+            data.put("taskId", task.getId());
             return success("风格化续写任务已启动", data);
         } catch (Exception e) {
+            if (e instanceof IllegalStateException) return error("TASK_CONFLICT", e.getMessage());
             return error("STYLE_CONTINUE_TASK_FAILED", e.getMessage());
         }
     }

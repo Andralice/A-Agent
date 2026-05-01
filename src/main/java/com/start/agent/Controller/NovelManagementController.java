@@ -2,10 +2,13 @@ package com.start.agent.controller;
 
 import com.start.agent.model.Chapter;
 import com.start.agent.model.ChapterFact;
+import com.start.agent.model.ChapterWriteState;
 import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.ConsistencyAlert;
 import com.start.agent.model.GenerationLog;
+import com.start.agent.model.GenerationTask;
 import com.start.agent.model.Novel;
+import com.start.agent.model.NovelWritePhase;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.repository.ChapterFactRepository;
 import com.start.agent.repository.CharacterProfileRepository;
@@ -15,6 +18,7 @@ import com.start.agent.repository.NovelRepository;
 import com.start.agent.repository.PlotSnapshotRepository;
 import com.start.agent.service.NovelAgentService;
 import com.start.agent.service.NovelExportService;
+import com.start.agent.service.GenerationTaskService;
 import com.start.agent.service.RegenerationTaskGuardService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
@@ -32,6 +36,7 @@ import java.util.concurrent.CompletableFuture;
 @RequestMapping("/api/novel")
 @CrossOrigin(origins = "*")
 public class NovelManagementController {
+    private static final List<String> ACTIVE_TASK_STATUSES = List.of("PENDING", "RUNNING");
     @Autowired private NovelAgentService agentService;
     @Autowired private NovelRepository novelRepository;
     @Autowired private CharacterProfileRepository characterProfileRepository;
@@ -41,6 +46,7 @@ public class NovelManagementController {
     @Autowired private PlotSnapshotRepository plotSnapshotRepository;
     @Autowired private NovelExportService novelExportService;
     @Autowired private RegenerationTaskGuardService regenerationTaskGuardService;
+    @Autowired private GenerationTaskService generationTaskService;
 
     @GetMapping("/list")
     public List<Novel> listNovels() { log.info("【API请求】获取小说列表"); return agentService.getAllNovels(); }
@@ -164,10 +170,108 @@ public class NovelManagementController {
     public Map<String, Object> getRegenerationTasks(@PathVariable Long novelId) {
         log.info("【API请求】获取小说 {} 的区间重生任务状态", novelId);
         List<String> runningRanges = regenerationTaskGuardService.getRunningRanges(novelId);
+        // 任务化后：优先展示 DB 中的活跃任务区间（跨实例）
+        try {
+            List<GenerationTask> active = generationTaskService.listTasksByNovel(novelId).stream()
+                    .filter(t -> ACTIVE_TASK_STATUSES.contains(t.getStatus()))
+                    .filter(t -> t.getRangeFrom() != null && t.getRangeTo() != null)
+                    .toList();
+            if (!active.isEmpty()) {
+                runningRanges = active.stream().map(t -> t.getRangeFrom() + "-" + t.getRangeTo()).distinct().toList();
+            }
+        } catch (Exception ignore) {
+        }
+        Novel novel = novelRepository.findById(novelId).orElse(null);
         Map<String, Object> result = new HashMap<>();
         result.put("novelId", novelId);
         result.put("hasRunningTask", !runningRanges.isEmpty());
         result.put("runningRanges", runningRanges);
+        if (novel != null) {
+            result.put("persistedWorkbench", buildPersistedWorkbench(novel));
+        }
+        return result;
+    }
+
+    @GetMapping("/{novelId}/generation-tasks")
+    public Map<String, Object> getGenerationTasks(@PathVariable Long novelId) {
+        List<GenerationTask> tasks = generationTaskService.listTasksByNovel(novelId);
+        Map<String, Object> result = new HashMap<>();
+        result.put("status", "success");
+        result.put("code", "OK");
+        result.put("novelId", novelId);
+        result.put("tasks", tasks);
+        return result;
+    }
+
+    @GetMapping("/tasks/{taskId}")
+    public Map<String, Object> getGenerationTask(@PathVariable Long taskId) {
+        return generationTaskService.getTask(taskId)
+                .map(task -> {
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("status", "success");
+                    result.put("code", "OK");
+                    result.put("task", task);
+                    return result;
+                })
+                .orElseGet(() -> error("TASK_NOT_FOUND", "任务不存在: " + taskId));
+    }
+
+    @PostMapping("/tasks/{taskId}/cancel")
+    public Map<String, Object> cancelGenerationTask(@PathVariable Long taskId) {
+        boolean ok = generationTaskService.cancelTask(taskId);
+        if (!ok) return error("TASK_CANCEL_FAILED", "任务不存在或已完成，无法取消");
+        Map<String, Object> data = new HashMap<>();
+        data.put("taskId", taskId);
+        return success("任务已取消", data);
+    }
+
+    @PostMapping("/tasks/{taskId}/kick")
+    public Map<String, Object> kickPendingTask(@PathVariable Long taskId) {
+        boolean ok = generationTaskService.kickIfPending(taskId);
+        if (!ok) return error("TASK_KICK_FAILED", "仅 PENDING 任务可手动触发执行，或任务不存在");
+        Map<String, Object> data = new HashMap<>();
+        data.put("taskId", taskId);
+        return success("任务已触发执行", data);
+    }
+
+    @PostMapping("/tasks/{taskId}/retry")
+    public Map<String, Object> retryGenerationTask(@PathVariable Long taskId) {
+        return generationTaskService.retryTask(taskId)
+                .map(task -> {
+                    generationTaskService.executeAsync(task.getId());
+                    Map<String, Object> data = new HashMap<>();
+                    data.put("taskId", task.getId());
+                    data.put("status", task.getStatus());
+                    return success("任务已重新入队并恢复执行", data);
+                })
+                .orElseGet(() -> error("TASK_RETRY_FAILED", "仅 FAILED/CANCELLED 任务可重试，或任务不存在"));
+    }
+
+    /** 前端监控：聚合 DB 工作台 + 内存区间锁 + 非 READY 章节列表。 */
+    @GetMapping("/{novelId}/writing-monitor")
+    public Map<String, Object> getWritingMonitor(@PathVariable Long novelId) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new RuntimeException("小说不存在，ID: " + novelId));
+        Map<String, Object> result = new HashMap<>();
+        result.put("status", "success");
+        result.put("code", "OK");
+        result.put("novelId", novelId);
+        result.putAll(buildPersistedWorkbench(novel));
+        result.put("volatileGuardRanges", regenerationTaskGuardService.getRunningRanges(novelId));
+        result.put("hasVolatileGuardOverlap", regenerationTaskGuardService.hasRunningTask(novelId));
+
+        List<Map<String, Object>> chapterBusyViews = new java.util.ArrayList<>();
+        for (Chapter c : agentService.getChaptersByNovelId(novelId)) {
+            String st = c.getWriteState() == null ? ChapterWriteState.READY.name() : c.getWriteState();
+            if (!ChapterWriteState.READY.name().equals(st)) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("chapterNumber", c.getChapterNumber());
+                row.put("title", c.getTitle());
+                row.put("writeState", st);
+                row.put("writeStateUpdatedAt", c.getWriteStateUpdatedAt());
+                chapterBusyViews.add(row);
+            }
+        }
+        result.put("chaptersWithActiveWriteMarks", chapterBusyViews);
         return result;
     }
 
@@ -191,7 +295,66 @@ public class NovelManagementController {
         result.put("code", "OK");
         result.put("generationStatus", failedCount > 0 ? "failed" : (outlineReady && !profiles.isEmpty() ? "generating_or_ready" : "generating"));
         result.put("lastUpdateTime", novel.getUpdateTime());
+        result.putAll(buildPersistedWorkbench(novel));
         return result;
+    }
+
+    /** 可与 {@link NovelWritePhase} / {@link ChapterWriteState} 配套展示的核心字段快照。 */
+    private Map<String, Object> buildPersistedWorkbench(Novel novel) {
+        Map<String, Object> map = new HashMap<>();
+        if (novel == null) return map;
+        // 1) 先取 DB 任务（最可信，可跨实例），用于展示“全区间 + 当前进度”
+        try {
+            List<GenerationTask> active = generationTaskService.listTasksByNovel(novel.getId()).stream()
+                    .filter(t -> ACTIVE_TASK_STATUSES.contains(t.getStatus()))
+                    .filter(t -> t.getRangeFrom() != null && t.getRangeTo() != null)
+                    .toList();
+            if (!active.isEmpty()) {
+                // 优先 RUNNING，其次 PENDING
+                GenerationTask picked = active.stream().filter(t -> "RUNNING".equals(t.getStatus())).findFirst().orElse(active.get(0));
+                int from = Math.min(picked.getRangeFrom(), picked.getRangeTo());
+                int to = Math.max(picked.getRangeFrom(), picked.getRangeTo());
+                Integer cur = picked.getCurrentChapter();
+                int cursor = cur == null ? from : Math.min(to, Math.max(from, cur + 1));
+                map.put("writePhase", mapTaskTypeToPhase(picked.getTaskType()));
+                map.put("writeRangeFrom", from);
+                map.put("writeRangeTo", to);
+                map.put("writeCursorChapter", cursor);
+                map.put("writePhaseDetail", picked.getTaskType() + " " + from + "-" + to);
+                map.put("writeStartedAt", picked.getStartedAt());
+                map.put("writeUpdatedAt", picked.getHeartbeatAt());
+                map.put("isBusyPersisted", true);
+                map.put("activeTaskId", picked.getId());
+                map.put("activeTaskStatus", picked.getStatus());
+                map.put("activeTaskCurrentChapter", picked.getCurrentChapter());
+                return map;
+            }
+        } catch (Exception ignore) {
+        }
+
+        // 2) 兜底：旧版工作台字段（单章流程仍会写）
+        String phase = novel.getWritePhase() == null || novel.getWritePhase().isBlank()
+                ? NovelWritePhase.IDLE.name() : novel.getWritePhase();
+        boolean busyPersisted = !NovelWritePhase.IDLE.name().equals(phase);
+        map.put("writePhase", phase);
+        map.put("writeRangeFrom", novel.getWriteRangeFrom());
+        map.put("writeRangeTo", novel.getWriteRangeTo());
+        map.put("writeCursorChapter", novel.getWriteCursorChapter());
+        map.put("writePhaseDetail", novel.getWritePhaseDetail());
+        map.put("writeStartedAt", novel.getWriteStartedAt());
+        map.put("writeUpdatedAt", novel.getWriteUpdatedAt());
+        map.put("isBusyPersisted", busyPersisted);
+        return map;
+    }
+
+    private String mapTaskTypeToPhase(String taskType) {
+        if (taskType == null) return NovelWritePhase.IDLE.name();
+        return switch (taskType) {
+            case "REGENERATE_RANGE" -> NovelWritePhase.REGENERATING_RANGE.name();
+            case "AUTO_CONTINUE_RANGE" -> NovelWritePhase.AUTO_CONTINUE_RANGE.name();
+            case "CONTINUE_SINGLE" -> NovelWritePhase.SINGLE_CONTINUE.name();
+            default -> NovelWritePhase.IDLE.name();
+        };
     }
 
     @GetMapping("/{novelId}/creative-process")
@@ -234,8 +397,15 @@ public class NovelManagementController {
         log.info("【API请求】新建小说，题材: {}, 设定长度: {}", request == null ? "未提供" : request.getTopic(), textLength(request == null ? null : request.getGenerationSetting()));
         try {
             if (request == null || request.getTopic() == null || request.getTopic().trim().isEmpty()) return error("INVALID_ARGUMENT", "题材不能为空");
-            CompletableFuture.runAsync(() -> agentService.processAndSend(0L, request.getTopic(), request.getGenerationSetting()));
-            return success("创作任务已启动，请通过进度接口轮询查看", null);
+            // 先落库小说记录，再用可恢复任务驱动首次生成（避免进程中断丢任务）
+            Novel novel = agentService.createNovel(0L, request.getTopic(), request.getGenerationSetting());
+            GenerationTask task = generationTaskService.enqueueInitialBootstrapTask(novel.getId(), 5);
+            generationTaskService.executeAsync(task.getId());
+            Map<String, Object> data = new HashMap<>();
+            data.put("novelId", novel.getId());
+            data.put("taskId", task.getId());
+            data.put("taskType", task.getTaskType());
+            return success("创作任务已入队并启动（可恢复），请通过任务接口轮询查看", data);
         } catch (Exception e) { return error("CREATE_TASK_FAILED", e.getMessage()); }
     }
 
@@ -250,9 +420,17 @@ public class NovelManagementController {
                 return error("TASK_CONFLICT", "目标章节正在重生/续写中，请稍后重试。");
             }
             String generationSetting = request == null ? null : request.getGenerationSetting();
-            CompletableFuture.runAsync(() -> agentService.continueChapter(0L, novelId.intValue(), chapterNumber, generationSetting));
-            return success("续写任务已启动，请通过进度接口轮询查看", null);
-        } catch (Exception e) { return error("CONTINUE_TASK_FAILED", e.getMessage()); }
+            GenerationTask task = generationTaskService.enqueueContinueTask(novelId, chapterNumber, generationSetting);
+            generationTaskService.executeAsync(task.getId());
+            Map<String, Object> data = new HashMap<>();
+            data.put("taskId", task.getId());
+            data.put("taskType", task.getTaskType());
+            data.put("targetChapter", task.getRangeFrom());
+            return success("续写任务已入队并启动，可通过 generation-tasks 查看恢复进度", data);
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException) return error("TASK_CONFLICT", e.getMessage());
+            return error("CONTINUE_TASK_FAILED", e.getMessage());
+        }
     }
 
     @PostMapping("/{novelId}/auto-continue")
@@ -267,9 +445,18 @@ public class NovelManagementController {
                 return error("TASK_CONFLICT", "目标区间存在进行中的重生/续写任务，请稍后重试。");
             }
             String generationSetting = request == null ? null : request.getGenerationSetting();
-            CompletableFuture.runAsync(() -> agentService.autoContinueChapter(0L, novelId.intValue(), targetChapterCount, generationSetting));
-            return success("自动续写任务已启动，请通过进度接口轮询查看", null);
-        } catch (Exception e) { return error("AUTO_CONTINUE_TASK_FAILED", e.getMessage()); }
+            GenerationTask task = generationTaskService.enqueueAutoContinueTask(novelId, targetChapterCount, generationSetting);
+            generationTaskService.executeAsync(task.getId());
+            Map<String, Object> data = new HashMap<>();
+            data.put("taskId", task.getId());
+            data.put("taskType", task.getTaskType());
+            data.put("rangeFrom", task.getRangeFrom());
+            data.put("rangeTo", task.getRangeTo());
+            return success("自动续写任务已入队并启动，可在重启后继续", data);
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException) return error("TASK_CONFLICT", e.getMessage());
+            return error("AUTO_CONTINUE_TASK_FAILED", e.getMessage());
+        }
     }
 
     @PostMapping("/{novelId}/chapters/{chapterNumber}/regenerate")
@@ -281,9 +468,17 @@ public class NovelManagementController {
                 return error("TASK_CONFLICT", "该章节已存在进行中的重生/续写任务，请稍后重试。");
             }
             String generationSetting = request == null ? null : request.getGenerationSetting();
-            CompletableFuture.runAsync(() -> agentService.regenerateChapter(0L, novelId.intValue(), chapterNumber, generationSetting));
-            return success("重新生成任务已启动，请通过进度接口轮询查看", null);
-        } catch (Exception e) { return error("REGENERATE_TASK_FAILED", e.getMessage()); }
+            GenerationTask task = generationTaskService.enqueueRegenerateRangeTask(novelId, chapterNumber, chapterNumber, generationSetting);
+            generationTaskService.executeAsync(task.getId());
+            Map<String, Object> data = new HashMap<>();
+            data.put("taskId", task.getId());
+            data.put("taskType", task.getTaskType());
+            data.put("targetChapter", chapterNumber);
+            return success("重新生成任务已入队并启动，可在重启后恢复", data);
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException) return error("TASK_CONFLICT", e.getMessage());
+            return error("REGENERATE_TASK_FAILED", e.getMessage());
+        }
     }
 
     @PostMapping("/{novelId}/chapters/regenerate-range")
@@ -300,12 +495,16 @@ public class NovelManagementController {
                 return error("TASK_CONFLICT", "目标区间存在进行中的重生/续写任务，请稍后重试。");
             }
             String generationSetting = request.getGenerationSetting();
-            CompletableFuture.runAsync(() -> agentService.regenerateChapterRange(0L, novelId.intValue(), startChapter, endChapter, generationSetting));
+            GenerationTask task = generationTaskService.enqueueRegenerateRangeTask(novelId, startChapter, endChapter, generationSetting);
+            generationTaskService.executeAsync(task.getId());
             Map<String, Object> data = new HashMap<>();
             data.put("startChapter", startChapter);
             data.put("endChapter", endChapter);
-            return success("区间重生任务已启动，请通过进度接口轮询查看", data);
+            data.put("taskId", task.getId());
+            data.put("taskType", task.getTaskType());
+            return success("区间重生任务已入队并启动，可在重启后恢复", data);
         } catch (Exception e) {
+            if (e instanceof IllegalStateException) return error("TASK_CONFLICT", e.getMessage());
             return error("REGENERATE_RANGE_TASK_FAILED", e.getMessage());
         }
     }
