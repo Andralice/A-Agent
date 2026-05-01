@@ -27,6 +27,9 @@ public class Novel {
     @Column(name = "generation_setting", columnDefinition = "TEXT")
     private String generationSetting;
 
+    @Column(name = "writing_pipeline", length = 40)
+    private String writingPipeline;
+
     @Column(name = "user_id")
     private Long userId;
 

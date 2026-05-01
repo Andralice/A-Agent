@@ -1,6 +1,6 @@
 package com.start.agent.config;
 
-import com.start.agent.Service.NapCatMessageService;
+import com.start.agent.service.NapCatMessageService;
 import com.start.agent.qq.QqMessageFacade;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;

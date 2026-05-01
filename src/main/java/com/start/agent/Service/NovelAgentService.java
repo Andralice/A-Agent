@@ -1,21 +1,30 @@
-package com.start.agent.Service;
+package com.start.agent.service;
 
 import com.start.agent.agent.NovelGenerationAgent;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.agent.model.Chapter;
+import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.Novel;
+import com.start.agent.model.WritingPipeline;
 import com.start.agent.repository.ChapterRepository;
 import com.start.agent.repository.NovelRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 public class NovelAgentService {
+    private static final int INIT_CHAPTERS = 5;
+    private static final Random RANDOM = new Random();
+    private static final Pattern CHAPTER_TITLE_PATTERN = Pattern.compile("^#?\\s*(第[\\d一二三四五六七八九十百千零]+章)(?:[:：\\s-]*(.*))?$");
+
     private final NapCatMessageService messageService;
     private final NovelGenerationAgent generationAgent;
     private final NovelRepository novelRepository;
@@ -23,18 +32,29 @@ public class NovelAgentService {
     private final GenerationLogService generationLogService;
     private final UserStatisticsService userStatisticsService;
     private final CharacterProfileService characterProfileService;
+    private final EntityConsistencyService entityConsistencyService;
+    private final StoryMemoryService storyMemoryService;
+    private final ConsistencyAlertService consistencyAlertService;
+    private final ChapterFactService chapterFactService;
+    private final PlotSnapshotService plotSnapshotService;
+    private final RegenerationTaskGuardService regenerationTaskGuardService;
     private final NovelMessageFormatter novelMessageFormatter;
     private final NovelExportService novelExportService;
-    private static final int INIT_CHAPTERS = 5;
-    private static final int MAX_AUTO = 20;
-    private static final int BATCH_SIZE = 3;
-    private static final Random RANDOM = new Random();
+    private final int defaultAutoContinueTarget;
+    private final int maxAutoContinueTarget;
+    private final ObjectMapper objectMapper;
 
-    public NovelAgentService(NapCatMessageService messageService, NovelGenerationAgent generationAgent,
-                             NovelRepository novelRepository, ChapterRepository chapterRepository,
-                             GenerationLogService generationLogService, UserStatisticsService userStatisticsService,
-                             CharacterProfileService characterProfileService, NovelMessageFormatter novelMessageFormatter,
-                             NovelExportService novelExportService) {
+    public NovelAgentService(NapCatMessageService messageService, NovelGenerationAgent generationAgent, NovelRepository novelRepository,
+                             ChapterRepository chapterRepository, GenerationLogService generationLogService, UserStatisticsService userStatisticsService,
+                             CharacterProfileService characterProfileService, EntityConsistencyService entityConsistencyService,
+                             StoryMemoryService storyMemoryService,
+                             ConsistencyAlertService consistencyAlertService, ChapterFactService chapterFactService,
+                             PlotSnapshotService plotSnapshotService,
+                             RegenerationTaskGuardService regenerationTaskGuardService,
+                             @Value("${novel.auto-continue.default-target:20}") int defaultAutoContinueTarget,
+                             @Value("${novel.auto-continue.max-target:200}") int maxAutoContinueTarget,
+                             NovelMessageFormatter novelMessageFormatter, NovelExportService novelExportService,
+                             ObjectMapper objectMapper) {
         this.messageService = messageService;
         this.generationAgent = generationAgent;
         this.novelRepository = novelRepository;
@@ -42,31 +62,45 @@ public class NovelAgentService {
         this.generationLogService = generationLogService;
         this.userStatisticsService = userStatisticsService;
         this.characterProfileService = characterProfileService;
+        this.entityConsistencyService = entityConsistencyService;
+        this.storyMemoryService = storyMemoryService;
+        this.consistencyAlertService = consistencyAlertService;
+        this.chapterFactService = chapterFactService;
+        this.plotSnapshotService = plotSnapshotService;
+        this.regenerationTaskGuardService = regenerationTaskGuardService;
+        this.defaultAutoContinueTarget = Math.max(1, defaultAutoContinueTarget);
+        this.maxAutoContinueTarget = Math.max(this.defaultAutoContinueTarget, Math.max(1, maxAutoContinueTarget));
         this.novelMessageFormatter = novelMessageFormatter;
         this.novelExportService = novelExportService;
+        this.objectMapper = objectMapper;
     }
 
-    public void processAndSend(Long groupId, String topic) { processAndSend(groupId, topic, null); }
+    public void processAndSend(Long groupId, String topic) { processAndSend(groupId, topic, null, WritingPipeline.POWER_FANTASY); }
 
     public void processAndSend(Long groupId, String topic, String setting) {
+        processAndSend(groupId, topic, setting, WritingPipeline.POWER_FANTASY);
+    }
+
+    public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline) {
         Long novelId = null;
         try {
-            Novel novel = createNovel(groupId, topic, setting);
+            Novel novel = createNovel(groupId, topic, setting, pipeline);
             novelId = novel.getId();
-            String outline = generationAgent.generateOutline(topic, setting);
+            WritingPipeline effectivePipeline = resolvePipeline(novel);
+            String outline = generationAgent.generateOutline(topic, setting, effectivePipeline);
+            String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline);
             generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
-            String profile = generationAgent.generateCharacterProfile(topic, setting);
-            generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0, "success", null);
             updateNovelDescription(novelId, outline);
-            characterProfileService.saveCharacterProfilesToDatabase(novelId, profile);
+            int savedProfiles = persistCharacterProfilesStrict(novelId, topic, setting, effectivePipeline, profile);
+            generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
+                    savedProfiles > 0 ? "success" : "failed",
+                    savedProfiles > 0 ? null : "strict json parse failed");
             userStatisticsService.updateGroupStatistics(groupId, 0, 0, true);
-            send(groupId, "Novel created: " + novel.getTitle());
-            String prev = "";
+            safeSend(groupId, "Novel created: " + novel.getTitle());
             for (int i = 1; i <= INIT_CHAPTERS; i++) {
-                Chapter chapter = gen(novel, i, prev, setting, null);
-                prev = chapter.getContent();
-                userStatisticsService.updateGroupStatistics(groupId, 1, len(prev), false);
-                send(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
+                Chapter chapter = gen(novel, i, setting, null);
+                userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
+                safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
             }
         } catch (Exception e) {
             log.error("create novel failed", e);
@@ -78,18 +112,29 @@ public class NovelAgentService {
     public void continueChapter(Long groupId, Integer novelId, Integer requestedChapter) { continueChapter(groupId, novelId, requestedChapter, null); }
 
     public void continueChapter(Long groupId, Integer novelId, Integer requestedChapter, String chapterSetting) {
+        continueChapterInternal(groupId, novelId, requestedChapter, chapterSetting, true);
+    }
+
+    private void continueChapterInternal(Long groupId, Integer novelId, Integer requestedChapter, String chapterSetting, boolean useTaskGuard) {
         try {
             Optional<Novel> opt = resolve(groupId, novelId);
-            if (opt.isEmpty()) return;
+            if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
             List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
             int num = requestedChapter == null ? chapters.size() + 1 : requestedChapter;
             Optional<Chapter> old = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num);
-            if (old.isPresent()) { send(groupId, novelMessageFormatter.formatExistingChapter(old.get())); return; }
-            String prev = chapters.isEmpty() ? "" : chapters.get(chapters.size() - 1).getContent();
-            Chapter chapter = gen(novel, num, prev, novel.getGenerationSetting(), chapterSetting);
-            send(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
-            userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
+            if (old.isPresent()) { safeSend(groupId, novelMessageFormatter.formatExistingChapter(old.get())); return; }
+            if (useTaskGuard && !regenerationTaskGuardService.tryAcquireRange(novel.getId(), num, num)) {
+                safeSend(groupId, "该章节正在重生/续写中，请稍后重试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
+                return;
+            }
+            try {
+                Chapter chapter = gen(novel, num, novel.getGenerationSetting(), chapterSetting);
+                userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
+                safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
+            } finally {
+                if (useTaskGuard) regenerationTaskGuardService.releaseRange(novel.getId(), num, num);
+            }
         } catch (Exception e) {
             log.error("continue failed", e);
             generationLogService.saveGenerationLog(novelId == null ? null : novelId.longValue(), requestedChapter, "chapter", 0, 0, "failed", e.getMessage());
@@ -101,323 +146,231 @@ public class NovelAgentService {
 
     public void autoContinueChapter(Long groupId, Integer novelId, Integer targetChapterCount, String chapterSetting) {
         try {
-            int target = targetChapterCount == null ? MAX_AUTO : targetChapterCount;
-            if (target > MAX_AUTO) { send(groupId, "auto continue limit is " + MAX_AUTO); return; }
             Optional<Novel> opt = resolve(groupId, novelId);
-            if (opt.isEmpty()) return;
+            if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
             int current = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId()).size();
-            
-            int totalChapters = target - current;
-            if (totalChapters <= 0) {
-                send(groupId, "已达到目标章节数，无需续写");
+            int target = targetChapterCount == null ? defaultAutoContinueTarget : targetChapterCount;
+            if (target <= current) {
+                safeSend(groupId, "目标章节数必须大于当前章节数（当前: " + current + "）");
                 return;
             }
-            
-            send(groupId, String.format("🚀 开始自动续写：第%d章到第%d章（共%d章，分批并行模式）", current + 1, target, totalChapters));
-            
-            AtomicInteger successCount = new AtomicInteger(0);
-            AtomicInteger failCount = new AtomicInteger(0);
-            
-            CompletableFuture.runAsync(() -> {
-                for (int batchStart = current + 1; batchStart <= target; batchStart += BATCH_SIZE) {
-                    int batchEnd = Math.min(batchStart + BATCH_SIZE - 1, target);
-                    List<CompletableFuture<Void>> batch = new ArrayList<>();
-                    
-                    log.info("【自动续写】开始处理批次：第{}章到第{}章", batchStart, batchEnd);
-                    
-                    for (int i = batchStart; i <= batchEnd; i++) {
-                        final int chapterNum = i;
-                        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                            try {
-                                continueSingle(groupId, novel, chapterNum, chapterSetting);
-                                int success = successCount.incrementAndGet();
-                                log.info("【自动续写】✅ 第{}章生成成功 ({}/{})", chapterNum, success + failCount.get(), totalChapters);
-                            } catch (Exception e) {
-                                int fail = failCount.incrementAndGet();
-                                log.error("【自动续写】❌ 第{}章生成失败 ({}/{})", chapterNum, successCount.get() + fail, totalChapters, e);
-                                safeSend(groupId, String.format("第%d章生成失败：%s", chapterNum, e.getMessage()));
-                            }
-                        });
-                        batch.add(future);
-                    }
-                    
-                    CompletableFuture.allOf(batch.toArray(new CompletableFuture[0])).join();
-                    
-                    int completed = successCount.get() + failCount.get();
-                    send(groupId, String.format("📊 进度：%d/%d章（成功：%d，失败：%d）", completed, totalChapters, successCount.get(), failCount.get()));
-                    
-                    if (batchEnd < target) {
-                        try {
-                            log.info("【自动续写】批次间隔3秒...");
-                            Thread.sleep(3000);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            log.warn("【自动续写】被中断");
-                            break;
-                        }
-                    }
-                }
-                
-                send(groupId, String.format("✅ 自动续写完成！总计：%d章，成功：%d章，失败：%d章", totalChapters, successCount.get(), failCount.get()));
-                log.info("【自动续写】全部完成 - 成功:{}, 失败:{}", successCount.get(), failCount.get());
-            });
-            
+            if (target > maxAutoContinueTarget) {
+                safeSend(groupId, "目标章节数超过安全上限（最大: " + maxAutoContinueTarget + "），请分批续写。");
+                return;
+            }
+            int from = current + 1;
+            if (!regenerationTaskGuardService.tryAcquireRange(novel.getId(), from, target)) {
+                safeSend(groupId, "目标区间存在进行中的写入任务，请稍后再试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
+                return;
+            }
+            try {
+                for (int i = from; i <= target; i++) continueChapterInternal(groupId, novel.getId().intValue(), i, chapterSetting, false);
+            } finally {
+                regenerationTaskGuardService.releaseRange(novel.getId(), from, target);
+            }
         } catch (Exception e) {
             log.error("auto continue failed", e);
             safeSend(groupId, "Auto continue failed: " + e.getMessage());
         }
     }
 
-    private void continueSingle(Long groupId, Novel novel, int num, String chapterSetting) {
-        List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
-        
-        String prev = "";
-        if (num == 1) {
-            prev = "";
-        } else {
-            Optional<Chapter> prevChapter = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num - 1);
-            if (prevChapter.isPresent()) {
-                prev = prevChapter.get().getContent();
-            } else {
-                prev = chapters.isEmpty() ? "" : chapters.get(chapters.size() - 1).getContent();
-            }
-        }
-        
-        log.info("【章节生成】开始生成第{}章，上一章内容长度: {}", num, prev.length());
-        
-        Chapter chapter = gen(novel, num, prev, novel.getGenerationSetting(), chapterSetting);
-        
-        if (chapter.getContent() == null || chapter.getContent().trim().isEmpty()) {
-            log.error("【章节生成】❌ 第{}章生成内容为空！", num);
-            throw new RuntimeException("第" + num + "章生成失败：AI返回内容为空");
-        }
-        
-        log.info("【章节生成】✅ 第{}章生成成功，内容长度: {}", num, chapter.getContent().length());
-        
-        userStatisticsService.updateGroupStatistics(groupId, 1, len(chapter.getContent()), false);
-        send(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
-    }
-
     public void regenerateChapter(Long groupId, Integer novelId, Integer chapterNumber) { regenerateChapter(groupId, novelId, chapterNumber, null); }
 
     public void regenerateChapter(Long groupId, Integer novelId, Integer chapterNumber, String newSetting) {
+        regenerateChapterRange(groupId, novelId, chapterNumber, chapterNumber, newSetting);
+    }
+
+    public void regenerateChapterRange(Long groupId, Integer novelId, Integer startChapter, Integer endChapter, String newSetting) {
         try {
-            if (chapterNumber == null || chapterNumber <= 0) {
-                send(groupId, "❌ 章节号必须大于0");
+            if (startChapter == null || endChapter == null || startChapter <= 0 || endChapter <= 0) {
+                safeSend(groupId, "章节号必须大于0");
                 return;
             }
-            
+            int from = Math.min(startChapter, endChapter);
+            int to = Math.max(startChapter, endChapter);
             Optional<Novel> opt = resolve(groupId, novelId);
-            if (opt.isEmpty()) {
-                send(groupId, "❌ 小说不存在");
+            if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
+            Novel novel = opt.get();
+            if (!regenerationTaskGuardService.tryAcquireRange(novel.getId(), from, to)) {
+                safeSend(groupId, "该区间章节正在重生中，请稍后再试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
                 return;
             }
-            
-            Novel novel = opt.get();
-            
-            send(groupId, String.format("🔄 开始重新生成第%d章%s...", chapterNumber, newSetting != null ? "（使用新设定）" : ""));
-            
-            CompletableFuture.runAsync(() -> {
-                try {
-                    Chapter regeneratedChapter = regenerateSingle(novel, chapterNumber, newSetting);
-                    send(groupId, novelMessageFormatter.formatNovelMessage(novel, regeneratedChapter));
-                    send(groupId, String.format("✅ 第%d章重新生成完成！", chapterNumber));
-                    log.info("【重新生成】✅ 第{}章重新生成成功", chapterNumber);
-                } catch (Exception e) {
-                    log.error("【重新生成】❌ 第{}章重新生成失败", chapterNumber, e);
-                    safeSend(groupId, String.format("❌ 第%d章重新生成失败：%s", chapterNumber, e.getMessage()));
+            try {
+                for (int chapterNum = from; chapterNum <= to; chapterNum++) {
+                    Chapter chapter = gen(novel, chapterNum, novel.getGenerationSetting(), newSetting);
+                    safeSend(groupId, novelMessageFormatter.formatNovelMessage(novel, chapter));
                 }
-            });
-            
+                safeSend(groupId, "区间重生完成: 第" + from + "章 到 第" + to + "章");
+            } finally {
+                regenerationTaskGuardService.releaseRange(novel.getId(), from, to);
+            }
         } catch (Exception e) {
             log.error("regenerate chapter failed", e);
             safeSend(groupId, "Regenerate chapter failed: " + e.getMessage());
         }
     }
 
-    private Chapter regenerateSingle(Novel novel, int chapterNumber, String newSetting) {
-        log.info("【重新生成】开始重新生成第{}章", chapterNumber);
-        
+    public void repairCharacterProfiles(Long groupId, Integer novelId, boolean forceRegenerate) {
+        repairCharacterProfiles(groupId, novelId, CharacterRepairOptions.simple(forceRegenerate));
+    }
+
+    public void repairCharacterProfiles(Long groupId, Integer novelId, CharacterRepairOptions options) {
+        try {
+            Optional<Novel> opt = resolve(groupId, novelId);
+            if (opt.isEmpty()) {
+                safeSend(groupId, "Novel not found");
+                return;
+            }
+            Novel novel = opt.get();
+            CharacterRepairOptions effectiveOptions = options == null ? CharacterRepairOptions.simple(false) : options;
+            boolean hasUsableProfiles = characterProfileService.hasUsableProfiles(novel.getId());
+            if (hasUsableProfiles && !effectiveOptions.forceRegenerate) {
+                safeSend(groupId, "角色设定已存在并可用，已执行脏数据修复，无需重建。");
+                return;
+            }
+
+            WritingPipeline pipeline = resolvePipeline(novel);
+            boolean repaired = false;
+            String lastError = null;
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    String repairSetting = buildCharacterRepairSetting(novel, effectiveOptions);
+                    String profileText = generationAgent.generateCharacterProfile(novel.getTopic(), repairSetting, pipeline);
+                    boolean replaceAll = effectiveOptions.rebuildMode == RebuildMode.ALL;
+                    int savedProfiles = characterProfileService.saveCharacterProfilesJsonWithMode(
+                            novel.getId(),
+                            profileText,
+                            replaceAll,
+                            effectiveOptions.targetCharacterNames
+                    );
+                    if (savedProfiles > 0 && characterProfileService.hasUsableProfiles(novel.getId())) {
+                        generationLogService.saveGenerationLog(novel.getId(), null, "character_profile_repair", len(profileText), 0, "success", null);
+                        safeSend(groupId, "角色设定修复完成" + (effectiveOptions.forceRegenerate ? "（强制重建）" : "（自动补全）"));
+                        repaired = true;
+                        break;
+                    }
+                    lastError = "解析结果无有效角色名";
+                } catch (Exception e) {
+                    lastError = e.getMessage();
+                }
+            }
+            if (!repaired) {
+                generationLogService.saveGenerationLog(novel.getId(), null, "character_profile_repair", 0, 0, "failed", lastError);
+                safeSend(groupId, "角色设定修复失败：生成结果质量不足，请稍后重试。");
+            }
+        } catch (Exception e) {
+            log.error("repair character profiles failed", e);
+            generationLogService.saveGenerationLog(novelId == null ? null : novelId.longValue(), null, "character_profile_repair", 0, 0, "failed", e.getMessage());
+            safeSend(groupId, "角色设定修复失败: " + e.getMessage());
+        }
+    }
+
+    private String buildCharacterRepairSetting(Novel novel, CharacterRepairOptions options) {
+        List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
+        StringBuilder builder = new StringBuilder();
+        if (novel.getGenerationSetting() != null && !novel.getGenerationSetting().isBlank()) {
+            builder.append(novel.getGenerationSetting().trim()).append("\n\n");
+        }
+        builder.append("【角色修复模式】\n");
+        builder.append("- 重建范围: ").append(options.rebuildMode == RebuildMode.PARTIAL ? "部分重建" : "全量重建").append("\n");
+        if (options.characterContextHint != null && !options.characterContextHint.isBlank()) {
+            builder.append("- 角色上下文约束: ").append(options.characterContextHint.trim()).append("\n");
+        }
+        if (options.targetCharacterNames != null && !options.targetCharacterNames.isEmpty()) {
+            builder.append("- 指定重建角色: ").append(String.join("、", options.targetCharacterNames)).append("\n");
+        }
+        if (options.extraHint != null && !options.extraHint.isBlank()) {
+            builder.append("- 附加要求: ").append(options.extraHint.trim()).append("\n");
+        }
+        builder.append("\n【已有大纲（必须参考）】\n").append(novel.getDescription() == null ? "无" : novel.getDescription()).append("\n");
+        builder.append("\n【已有章节摘要（必须参考）】\n").append(summary(chapters));
+        builder.append("\n【已有角色档案（必须参考，保持名称连续性）】\n").append(characterProfileService.getCharacterProfileFromDatabase(novel.getId()));
+        return builder.toString();
+    }
+
+    private Chapter gen(Novel novel, int num, String novelSetting, String chapterSetting) {
+        String profile = characterProfileService.getStableCharacterProfileBlock(novel.getId());
         List<Chapter> allChapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
-        
-        String prev = "";
-        String nextSummary = "";
-        
-        if (chapterNumber == 1) {
-            prev = "";
-        } else {
-            Optional<Chapter> prevChapter = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), chapterNumber - 1);
-            if (prevChapter.isPresent()) {
-                prev = prevChapter.get().getContent();
-                log.info("【重新生成】已获取第{}章内容作为上文，长度: {}", chapterNumber - 1, prev.length());
+        String previousContent = num <= 1 ? "" : chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num - 1).map(Chapter::getContent).orElse("");
+        String nextContent = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num + 1).map(Chapter::getContent).orElse("");
+        List<CharacterProfile> characterProfiles = characterProfileService.getProfiles(novel.getId());
+        List<EntityConsistencyService.LockRule> lockRules = entityConsistencyService.buildStrongLockRules(characterProfiles);
+        List<String> lockedNames = lockRules.stream().map(EntityConsistencyService.LockRule::getName).toList();
+        String immutableConstraints = entityConsistencyService.buildImmutableConstraints(lockRules);
+        String longTermMemory = storyMemoryService.buildStoryMemory(allChapters, lockedNames);
+        String factMemory = chapterFactService.buildFactMemory(novel.getId(), 15);
+        String snapshotMemory = plotSnapshotService.getLatestSnapshotBlock(novel.getId());
+        WritingPipeline pipeline = resolvePipeline(novel);
+        String content = generationAgent.generateChapter(
+                novel.getDescription(),
+                num,
+                previousContent,
+                nextContent,
+                profile,
+                summary(allChapters) + "\n\n" + longTermMemory + "\n\n" + factMemory + "\n\n" + snapshotMemory,
+                novelSetting,
+                chapterSetting,
+                immutableConstraints,
+                pipeline
+        );
+        if (content == null || content.trim().isEmpty()) throw new RuntimeException("AI生成失败：返回内容为空");
+        String issueHint = entityConsistencyService.detectNameConsistencyIssue(previousContent, content, lockRules);
+        String snapshotIssueHint = plotSnapshotService.detectSnapshotDrift(novel.getId(), content, lockedNames);
+        if (snapshotIssueHint != null) {
+            consistencyAlertService.saveAlert(novel.getId(), num, "snapshot_drift", "medium", snapshotIssueHint, false, false);
+        }
+        String combinedIssueHint = combineIssueHint(issueHint, snapshotIssueHint);
+        if (combinedIssueHint != null) {
+            log.warn("第{}章检测到一致性风险，触发自动修复: {}", num, combinedIssueHint);
+            if (issueHint != null) {
+                consistencyAlertService.saveAlert(novel.getId(), num, "name_consistency", "high", issueHint, true, false);
+            }
+            String revised = generationAgent.reviseChapterForConsistency(content, immutableConstraints, combinedIssueHint);
+            if (revised != null && !revised.trim().isEmpty()) {
+                content = revised;
+                String secondIssue = entityConsistencyService.detectNameConsistencyIssue(previousContent, content, lockRules);
+                String secondSnapshotIssue = plotSnapshotService.detectSnapshotDrift(novel.getId(), content, lockedNames);
+                boolean fixSuccess = secondIssue == null && secondSnapshotIssue == null;
+                consistencyAlertService.saveAlert(novel.getId(), num, "name_consistency_fix", fixSuccess ? "info" : "high",
+                        fixSuccess ? "自动修复成功" : "自动修复后仍存在一致性风险", true, fixSuccess);
             }
         }
-        
-        if (chapterNumber < allChapters.size()) {
-            StringBuilder summary = new StringBuilder();
-            for (int i = chapterNumber; i < Math.min(chapterNumber + 2, allChapters.size()); i++) {
-                Chapter ch = allChapters.get(i);
-                if (ch.getChapterNumber() > chapterNumber) {
-                    String content = ch.getContent() != null ? ch.getContent() : "";
-                    summary.append("第").append(ch.getChapterNumber()).append("章: ")
-                           .append(content.substring(0, Math.min(200, content.length())))
-                           .append("\n");
-                }
-            }
-            nextSummary = summary.toString();
-            log.info("【重新生成】已获取后续章节摘要，长度: {}", nextSummary.length());
+        ChapterDraft draft = normalizeChapterDraft(content, num);
+        ChapterSidecar sidecar = extractChapterSidecarSafe(novel, num, draft.content, pipeline, lockedNames);
+        if (sidecar != null && sidecar.title != null && !sidecar.title.isBlank()) {
+            draft = normalizeChapterDraft(sidecar.title + "\n" + draft.content, num);
         }
-        
-        String profile = characterProfileService.getCharacterProfileFromDatabase(novel.getId());
-        String setting = newSetting != null ? newSetting : novel.getGenerationSetting();
-        
-        log.info("【重新生成】调用AI生成第{}章...", chapterNumber);
-        String content = generationAgent.generateChapter(novel.getDescription(), chapterNumber, prev, profile, nextSummary, setting, newSetting);
-        
-        if (content == null || content.trim().isEmpty()) {
-            log.error("【重新生成】❌ AI返回内容为空");
-            throw new RuntimeException("AI生成失败：返回内容为空");
-        }
-        
-        if (content.contains("待审核内容") || content.contains("未提供具体文本")) {
-            log.error("【重新生成】❌ 内容包含审核标记");
-            throw new RuntimeException("AI生成失败：内容异常");
-        }
-        
-        TitleExtractionResult result = extractAndRemoveTitle(content);
-        String chapterTitle = result.getTitle();
-        String cleanContent = result.getContent();
-        
-        log.info("【重新生成】第{}章标题: {}", chapterNumber, chapterTitle);
-        log.info("【内容清理】已删除标题行，原文长度: {} -> 清理后长度: {}", content.length(), cleanContent.length());
-        
-        generationLogService.saveGenerationLog(novel.getId(), chapterNumber, "regenerate", len(cleanContent), 0, "success", null);
-        
-        Chapter chapter = saveChapter(novel.getId(), chapterNumber, chapterTitle, cleanContent, setting);
-        
-        log.info("【重新生成】✅ 第{}章保存成功，内容长度: {}", chapterNumber, cleanContent.length());
-        
-        userStatisticsService.updateGroupStatistics(novel.getGroupId(), 1, len(cleanContent), false);
-        
-        return chapter;
-    }
-
-    private Chapter gen(Novel novel, int num, String prev, String novelSetting, String chapterSetting) {
-        String profile = characterProfileService.getCharacterProfileFromDatabase(novel.getId());
-        String summary = summary(chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId()));
-        String content = generationAgent.generateChapter(novel.getDescription(), num, prev, profile, summary, novelSetting, chapterSetting);
-        
-        if (content == null || content.trim().isEmpty()) {
-            log.error("【AI生成】❌ 第{}章AI返回内容为空", num);
-            throw new RuntimeException("AI生成失败：返回内容为空");
-        }
-        
-        TitleExtractionResult result = extractAndRemoveTitle(content);
-        String chapterTitle = result.getTitle();
-        String cleanContent = result.getContent();
-        
-        log.info("【章节标题】第{}章标题: {}", num, chapterTitle);
-        log.info("【内容清理】已删除标题行，原文长度: {} -> 清理后长度: {}", content.length(), cleanContent.length());
-        
-        generationLogService.saveGenerationLog(novel.getId(), num, "chapter", len(cleanContent), 0, "success", null);
-        return saveChapter(novel.getId(), num, chapterTitle, cleanContent, chapterSetting);
-    }
-
-    private String generateChapterTitle(Novel novel, int chapterNumber, String content) {
-        if (content == null || content.trim().isEmpty()) {
-            return "第" + chapterNumber + "章";
-        }
-        
-        try {
-            TitleExtractionResult result = extractAndRemoveTitle(content);
-            return result.getTitle();
-        } catch (Exception e) {
-            log.warn("【章节标题】生成标题失败，使用默认标题", e);
-            return "第" + chapterNumber + "章";
-        }
-    }
-
-    private TitleExtractionResult extractAndRemoveTitle(String content) {
-        if (content == null || content.trim().isEmpty()) {
-            return new TitleExtractionResult("未知章节", content);
-        }
-        
-        try {
-            String[] lines = content.split("\n");
-            
-            for (int i = 0; i < Math.min(5, lines.length); i++) {
-                String line = lines[i].trim();
-                
-                if (line.matches("^#\\s*第[\\d一二三四五六七八九十百千零]+章[:：].*$")) {
-                    String title = line.replaceAll("^#\\s*", "").trim();
-                    String cleanContent = String.join("\n", java.util.Arrays.copyOfRange(lines, i + 1, lines.length));
-                    return new TitleExtractionResult(title, cleanContent.trim());
-                }
-                
-                if (line.matches("^第[\\d一二三四五六七八九十百千零]+章[:：].*$")) {
-                    String title = line.trim();
-                    String cleanContent = String.join("\n", java.util.Arrays.copyOfRange(lines, i + 1, lines.length));
-                    return new TitleExtractionResult(title, cleanContent.trim());
-                }
-                
-                if (line.matches("^Chapter\\s+\\d+[:：].*$")) {
-                    String title = line.trim();
-                    String cleanContent = String.join("\n", java.util.Arrays.copyOfRange(lines, i + 1, lines.length));
-                    return new TitleExtractionResult(title, cleanContent.trim());
-                }
-            }
-            
-            String firstLine = lines[0].trim();
-            if (firstLine.length() > 50) {
-                firstLine = firstLine.substring(0, 50);
-            }
-            
-            String title = firstLine.isEmpty() ? "第1章" : firstLine;
-            String cleanContent = content;
-            
-            return new TitleExtractionResult(title, cleanContent);
-        } catch (Exception e) {
-            log.warn("【标题提取】提取失败，返回原文", e);
-            return new TitleExtractionResult("未知章节", content);
-        }
-    }
-
-    private static class TitleExtractionResult {
-        private final String title;
-        private final String content;
-        
-        public TitleExtractionResult(String title, String content) {
-            this.title = title;
-            this.content = content;
-        }
-        
-        public String getTitle() {
-            return title;
-        }
-        
-        public String getContent() {
-            return content;
-        }
+        chapterFactService.rebuildFactsForChapter(
+                novel.getId(),
+                num,
+                draft.content,
+                lockedNames,
+                sidecar == null ? List.of() : sidecar.facts,
+                sidecar == null ? null : sidecar.continuityAnchor
+        );
+        plotSnapshotService.refreshSnapshotIfNeeded(novel.getId(), num, lockedNames);
+        generationLogService.saveGenerationLog(novel.getId(), num, "chapter", len(draft.content), 0, "success", null);
+        return saveChapter(novel.getId(), num, draft.title, draft.content, chapterSetting);
     }
 
     public void listNovels(Long groupId) {
         StringBuilder msg = new StringBuilder("Novel list:\n");
         for (Novel n : novelRepository.findByGroupId(groupId)) msg.append(n.getId()).append(" ").append(n.getTitle()).append("\n");
-        send(groupId, msg.toString());
+        safeSend(groupId, msg.toString());
     }
 
     public void showOutline(Long groupId, Integer novelId) {
-        Optional<Novel> n = novelId == null ? latest(groupId) : novelRepository.findById(novelId.longValue());
-        send(groupId, n.map(x -> x.getTitle() + "\n" + x.getDescription()).orElse("Novel not found"));
+        Optional<Novel> n = resolve(groupId, novelId);
+        safeSend(groupId, n.map(x -> x.getTitle() + "\n" + x.getDescription()).orElse("Novel not found"));
     }
 
     public void readNovel(Long groupId, Integer novelId, Integer chapterNum) {
-        Optional<Novel> n = novelId == null ? latest(groupId) : novelRepository.findById(novelId.longValue());
-        if (n.isEmpty()) { send(groupId, "Novel not found"); return; }
+        Optional<Novel> n = resolve(groupId, novelId);
+        if (n.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
         List<Chapter> cs = chapterRepository.findByNovelIdOrderByChapterNumberAsc(n.get().getId());
         Chapter c = chapterNum == null ? (cs.isEmpty() ? null : cs.get(0)) : chapterRepository.findByNovelIdAndChapterNumber(n.get().getId(), chapterNum).orElse(null);
-        send(groupId, c == null ? "Chapter not found" : c.getTitle() + "\n" + c.getContent());
+        safeSend(groupId, c == null ? "Chapter not found" : c.getTitle() + "\n" + c.getContent());
     }
 
     @Transactional
@@ -432,12 +385,18 @@ public class NovelAgentService {
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting) {
+        return createNovel(groupId, topic, setting, WritingPipeline.POWER_FANTASY);
+    }
+
+    @Transactional
+    public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline) {
         Novel n = new Novel();
         n.setTitle(title(topic));
         n.setTopic(topic);
         n.setGenerationSetting(norm(setting));
         n.setGroupId(groupId);
         n.setDescription("AI generated novel");
+        n.setWritingPipeline((pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline).name());
         return novelRepository.save(n);
     }
 
@@ -449,42 +408,174 @@ public class NovelAgentService {
         Optional<Chapter> existing = chapterRepository.findByNovelIdAndChapterNumber(novelId, num);
         if (existing.isPresent()) {
             Chapter chapter = existing.get();
-            chapter.setTitle(title);
-            chapter.setContent(content);
-            chapter.setGenerationSetting(norm(setting));
+            chapter.setTitle(title); chapter.setContent(content); chapter.setGenerationSetting(norm(setting));
             return chapterRepository.save(chapter);
         }
         Chapter c = new Chapter();
-        c.setNovelId(novelId);
-        c.setChapterNumber(num);
-        c.setTitle(title);
-        c.setContent(content);
-        c.setGenerationSetting(norm(setting));
+        c.setNovelId(novelId); c.setChapterNumber(num); c.setTitle(title); c.setContent(content); c.setGenerationSetting(norm(setting));
         return chapterRepository.save(c);
+    }
+
+    public List<Novel> getAllNovels() {
+        return novelRepository.findAll();
+    }
+
+    public List<Chapter> getChaptersByNovelId(Long novelId) {
+        return chapterRepository.findByNovelIdOrderByChapterNumberAsc(novelId);
+    }
+
+    public String exportNovelToTxt(Long novelId) {
+        return novelExportService.exportNovelToTxt(novelId);
+    }
+
+    @Transactional
+    public void updateNovelPipeline(Long novelId, WritingPipeline pipeline) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new RuntimeException("novel not found: " + novelId));
+        novel.setWritingPipeline((pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline).name());
+        novelRepository.save(novel);
+    }
+
+    private WritingPipeline resolvePipeline(Novel novel) {
+        if (novel == null || novel.getWritingPipeline() == null || novel.getWritingPipeline().isBlank()) {
+            return WritingPipeline.POWER_FANTASY;
+        }
+        try {
+            return WritingPipeline.valueOf(novel.getWritingPipeline());
+        } catch (Exception ignore) {
+            return WritingPipeline.POWER_FANTASY;
+        }
+    }
+
+    private int persistCharacterProfilesStrict(Long novelId, String topic, String setting, WritingPipeline pipeline, String firstResult) {
+        int saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, firstResult);
+        if (saved > 0) return saved;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            String retryPromptSetting = (setting == null ? "" : setting + "\n") + "【输出要求】必须返回严格JSON对象，字段仅包含 characters/name/type/want/fear/knowledge/summary。";
+            String retryResult = generationAgent.generateCharacterProfile(topic, retryPromptSetting, pipeline);
+            saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, retryResult);
+            if (saved > 0) return saved;
+        }
+        return 0;
     }
 
     private Optional<Novel> resolve(Long groupId, Integer novelId) { return novelId == null ? latest(groupId) : novelRepository.findById(novelId.longValue()); }
     private Optional<Novel> latest(Long groupId) { return novelRepository.findByGroupId(groupId).stream().findFirst(); }
     private String norm(String s) { return s == null || s.trim().isEmpty() ? null : s.trim(); }
     private int len(String s) { return s == null ? 0 : s.length(); }
-    private void send(Long g, String m) { messageService.sendGroupMessage(g, m); }
-    private void safeSend(Long g, String m) { try { send(g, m); } catch (Exception e) { log.error("send failed", e); } }
-    private String title(String topic) {
-        List<String> t = Arrays.asList("%s: %s", "%s legend", "%s rise");
-        List<String> s = Arrays.asList("Awakening", "Rebirth", "Fantasy");
-        return String.format(t.get(RANDOM.nextInt(t.size())), topic, s.get(RANDOM.nextInt(s.size())));
+    private void safeSend(Long g, String m) { try { messageService.sendGroupMessage(g, m); } catch (Exception e) { log.error("send failed", e); } }
+    private String title(String topic) { List<String> t = Arrays.asList("%s: %s", "%s legend", "%s rise"); List<String> s = Arrays.asList("Awakening", "Rebirth", "Fantasy"); return String.format(t.get(RANDOM.nextInt(t.size())), topic, s.get(RANDOM.nextInt(s.size()))); }
+    private String summary(List<Chapter> cs) { if (cs == null || cs.isEmpty()) return ""; StringBuilder sb = new StringBuilder(); int from = Math.max(0, cs.size() - 3); for (int i = from; i < cs.size(); i++) { String c = cs.get(i).getContent() == null ? "" : cs.get(i).getContent(); sb.append(cs.get(i).getTitle()).append(": ").append(c, 0, Math.min(200, c.length())).append("\n"); } return sb.toString(); }
+    private String combineIssueHint(String first, String second) {
+        if (first == null || first.isBlank()) return (second == null || second.isBlank()) ? null : second;
+        if (second == null || second.isBlank()) return first;
+        return first + " " + second;
     }
-    private String summary(List<Chapter> cs) {
-        if (cs == null || cs.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        int from = Math.max(0, cs.size() - 3);
-        for (int i = from; i < cs.size(); i++) {
-            String c = cs.get(i).getContent() == null ? "" : cs.get(i).getContent();
-            sb.append(cs.get(i).getTitle()).append(": ").append(c, 0, Math.min(200, c.length())).append("\n");
+
+    private ChapterSidecar extractChapterSidecarSafe(Novel novel, int chapterNumber, String content, WritingPipeline pipeline, List<String> lockedNames) {
+        try {
+            String json = generationAgent.generateChapterSidecar(content, novel.getDescription(), chapterNumber, pipeline);
+            JsonNode root = objectMapper.readTree(extractJsonBody(json));
+            ChapterSidecar sidecar = new ChapterSidecar();
+            sidecar.title = sanitizeShort(root.path("title").asText(null), 60);
+            sidecar.continuityAnchor = sanitizeShort(root.path("continuity_anchor").asText(null), 200);
+            sidecar.facts = new ArrayList<>();
+            JsonNode factsNode = root.path("facts");
+            if (factsNode.isArray()) {
+                for (JsonNode node : factsNode) {
+                    String fact = sanitizeShort(node.asText(null), 200);
+                    if (fact != null && !fact.isBlank()) sidecar.facts.add(fact);
+                }
+            }
+            if (sidecar.title != null && !sidecar.title.startsWith("第")) {
+                sidecar.title = "第" + chapterNumber + "章 " + sidecar.title;
+            }
+            if (sidecar.facts.isEmpty() && (sidecar.continuityAnchor == null || sidecar.continuityAnchor.isBlank())) return null;
+            return sidecar;
+        } catch (Exception e) {
+            log.warn("章节sidecar提取失败，第{}章，继续使用正文解析: {}", chapterNumber, e.getMessage());
+            return null;
         }
-        return sb.toString();
     }
-    public List<Novel> getAllNovels() { return novelRepository.findAll(); }
-    public List<Chapter> getChaptersByNovelId(Long novelId) { return chapterRepository.findByNovelIdOrderByChapterNumberAsc(novelId); }
-    public String exportNovelToTxt(Long novelId) { return novelExportService.exportNovelToTxt(novelId); }
+
+    private String extractJsonBody(String text) {
+        if (text == null) return "{}";
+        String trimmed = text.trim();
+        if (trimmed.startsWith("```")) {
+            trimmed = trimmed.replaceFirst("^```(?:json)?\\s*", "");
+            trimmed = trimmed.replaceFirst("\\s*```\\s*$", "");
+        }
+        int start = trimmed.indexOf('{');
+        int end = trimmed.lastIndexOf('}');
+        if (start >= 0 && end > start) return trimmed.substring(start, end + 1);
+        return trimmed;
+    }
+
+    private String sanitizeShort(String text, int maxLen) {
+        if (text == null || text.isBlank()) return null;
+        String normalized = text.replace("\n", " ").trim();
+        return normalized.length() <= maxLen ? normalized : normalized.substring(0, maxLen);
+    }
+
+    private ChapterDraft normalizeChapterDraft(String rawContent, int chapterNumber) {
+        String[] lines = rawContent.trim().split("\\n");
+        String defaultTitle = "第" + chapterNumber + "章";
+        if (lines.length == 0) return new ChapterDraft(defaultTitle, rawContent.trim());
+        String firstLine = lines[0].trim().replaceFirst("^#\\s*", "");
+        Matcher matcher = CHAPTER_TITLE_PATTERN.matcher(firstLine);
+        if (matcher.matches()) {
+            String prefix = matcher.group(1);
+            String suffix = matcher.group(2) == null ? "" : matcher.group(2).trim();
+            String normalizedTitle = suffix.isEmpty() ? prefix : prefix + " " + suffix;
+            String cleanBody = String.join("\n", Arrays.copyOfRange(lines, 1, lines.length)).trim();
+            return new ChapterDraft(normalizedTitle, cleanBody.isEmpty() ? rawContent.trim() : cleanBody);
+        }
+        return new ChapterDraft(defaultTitle, rawContent.trim());
+    }
+
+    private static class ChapterDraft {
+        private final String title;
+        private final String content;
+        private ChapterDraft(String title, String content) { this.title = title; this.content = content; }
+    }
+
+    private static class ChapterSidecar {
+        private String title;
+        private String continuityAnchor;
+        private List<String> facts;
+    }
+
+    public static class CharacterRepairOptions {
+        private final boolean forceRegenerate;
+        private final RebuildMode rebuildMode;
+        private final String characterContextHint;
+        private final List<String> targetCharacterNames;
+        private final String extraHint;
+
+        public CharacterRepairOptions(boolean forceRegenerate, RebuildMode rebuildMode, String characterContextHint,
+                                      List<String> targetCharacterNames, String extraHint) {
+            this.forceRegenerate = forceRegenerate;
+            this.rebuildMode = rebuildMode == null ? RebuildMode.ALL : rebuildMode;
+            this.characterContextHint = characterContextHint;
+            this.targetCharacterNames = targetCharacterNames == null ? List.of() : targetCharacterNames;
+            this.extraHint = extraHint;
+        }
+
+        public static CharacterRepairOptions simple(boolean forceRegenerate) {
+            return new CharacterRepairOptions(forceRegenerate, RebuildMode.ALL, null, List.of(), null);
+        }
+    }
+
+    public enum RebuildMode {
+        ALL,
+        PARTIAL;
+
+        public static RebuildMode from(String mode) {
+            if (mode == null || mode.isBlank()) return ALL;
+            return switch (mode.trim().toLowerCase()) {
+                case "all" -> ALL;
+                case "partial" -> PARTIAL;
+                default -> throw new IllegalArgumentException("rebuildMode 仅支持 all 或 partial");
+            };
+        }
+    }
 }
