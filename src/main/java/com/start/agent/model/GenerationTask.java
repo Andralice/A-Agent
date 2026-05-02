@@ -5,6 +5,9 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
+/**
+ * 可恢复的异步生成任务：类型、状态、章节区间等，用于进程重启后续跑。
+ */
 @Data
 @Entity
 @Table(name = "generation_task", indexes = {

@@ -6,6 +6,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
+/**
+ * 小说章节生成编排：串联初稿、一致性审查、内容审核、润色、终稿去 AI 味；并按 {@link WritingPipeline}、热梗开关拼接提示词。
+ */
 @Slf4j
 @Component
 public class NovelGenerationAgent {
@@ -28,9 +31,21 @@ public class NovelGenerationAgent {
     }
 
     public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline) {
-        log.info("【🤖 AI调用】开始生成故事大纲 - 题材: {}, 设定长度: {}", topic, textLength(generationSetting));
+        return generateOutline(topic, generationSetting, pipeline, false);
+    }
+
+    public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled) {
+        log.info("【🤖 AI调用】开始生成故事大纲 - 题材: {}, 设定长度: {}, hotMeme={}", topic, textLength(generationSetting), hotMemeEnabled);
         long startTime = System.currentTimeMillis();
         String settingBlock = buildSettingBlock(generationSetting);
+        String outlineCraft = NarrativeCraftPrompts.outlineAntiTropeBlock()
+                + "\n" + NarrativeCraftPrompts.outlineReaderAppealBlock();
+        if (isShuangwenPipeline(pipeline)) {
+            outlineCraft = outlineCraft + "\n" + NarrativeCraftPrompts.outlineShuangwenUniversalBlock();
+        }
+        if (hotMemeEnabled) {
+            outlineCraft = outlineCraft + "\n" + NarrativeCraftPrompts.hotMemeOutlineBlock();
+        }
 
         String prompt = String.format("""
             你是一位极具创意的全能型作家，擅长各种类型的小说创作。
@@ -59,7 +74,7 @@ public class NovelGenerationAgent {
             - 对立角色
             - 剧情规划
             - 写作风格要求
-            """, topic, settingBlock, NarrativeCraftPrompts.outlineAntiTropeBlock(), styleGuide(pipeline));
+            """, topic, settingBlock, outlineCraft, styleGuide(pipeline));
 
         return callAi(prompt, startTime, "大纲生成");
     }
@@ -68,19 +83,34 @@ public class NovelGenerationAgent {
                                   String characterProfile, String previousChaptersSummary,
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline) {
-        log.info("【📝 生态型AI】开始第{}章创作（因果驱动模式）", chapterNumber);
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, false);
+    }
+
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled) {
+        log.info("【📝 生态型AI】开始第{}章创作（因果驱动模式），hotMeme={}", chapterNumber, hotMemeEnabled);
         long totalStartTime = System.currentTimeMillis();
 
         try {
             log.info("【步骤1/5】调用创作Agent生成初稿...");
-            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline);
+            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled);
             log.info("【步骤1/5】✅ 初稿生成成功，长度: {} 字符", draft.length());
 
             log.info("【步骤2/5】调用一致性审查Agent...");
             String consistencyProfile = mergeSettings(characterProfile, novelSetting, chapterSetting);
+            String consistencyExtraShuang = isShuangwenPipeline(pipeline)
+                    ? NarrativeCraftPrompts.consistencyReviewShuangwenUniversalBlock()
+                    : "";
+            String consistencyExtraMeme = hotMemeEnabled
+                    ? NarrativeCraftPrompts.consistencyHotMemeReviewBlock()
+                    : "";
+            final String consistencyExtra = consistencyExtraShuang + consistencyExtraMeme;
             String consistentContent = safeStep(
                     "一致性审查",
-                    () -> consistencyAgent.reviewConsistency(draft, outline, consistencyProfile, chapterNumber, previousChaptersSummary),
+                    () -> consistencyAgent.reviewConsistency(draft, outline, consistencyProfile, chapterNumber, previousChaptersSummary, consistencyExtra),
                     draft
             );
             log.info("【步骤2/5】✅ 一致性审查完成，长度: {} 字符", consistentContent.length());
@@ -91,16 +121,20 @@ public class NovelGenerationAgent {
 
             log.info("【步骤4/5】调用润色Agent进行文笔优化...");
             String polishingOutline = mergeSettings(outline, novelSetting, chapterSetting);
+            if (hotMemeEnabled) {
+                polishingOutline = polishingOutline + NarrativeCraftPrompts.hotMemePolishHintBlock();
+            }
+            String polishingOutlineFinal = polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline);
             String polishedContent = safeStep(
                     "文笔润色",
-                    () -> polishingAgent.polish(reviewedContent, polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline), chapterNumber),
+                    () -> polishingAgent.polish(reviewedContent, polishingOutlineFinal, chapterNumber, pipeline),
                     reviewedContent
             );
             log.info("【步骤4/5】✅ 润色优化完成，长度: {} 字符", polishedContent.length());
 
             log.info("【步骤5/5】进行最终内容审核...");
             String reviewedFinalContent = safeStep("最终审核", () -> reviewAgent.reviewAndFix(polishedContent), polishedContent);
-            String finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline), reviewedFinalContent);
+            String finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline, hotMemeEnabled), reviewedFinalContent);
             log.info("【步骤5/5】✅ 最终审核完成，长度: {} 字符", finalContent.length());
 
             long totalElapsed = System.currentTimeMillis() - totalStartTime;
@@ -115,9 +149,17 @@ public class NovelGenerationAgent {
 
     private String generateDraft(String outline, int chapterNumber, String previousContent, String nextContent,
                                  String characterProfile, String novelSetting, String chapterSetting,
-                                 String immutableConstraints, WritingPipeline pipeline) {
+                                 String immutableConstraints, WritingPipeline pipeline, boolean hotMemeEnabled) {
         log.info("【🤖 创作Agent】开始生成第{}章初稿", chapterNumber);
         long startTime = System.currentTimeMillis();
+        String draftRules = NarrativeCraftPrompts.chapterDraftHardRules()
+                + "\n" + NarrativeCraftPrompts.chapterReaderEngagementBlock();
+        if (isShuangwenPipeline(pipeline)) {
+            draftRules = draftRules + "\n" + NarrativeCraftPrompts.chapterDraftShuangwenUniversalBlock();
+        }
+        if (hotMemeEnabled) {
+            draftRules = draftRules + "\n" + NarrativeCraftPrompts.hotMemeChapterDraftBlock();
+        }
 
         String prompt = String.format("""
             你是一位精通网文节奏的顶级作家，采用"生态型AI"创作模式。
@@ -154,14 +196,14 @@ public class NovelGenerationAgent {
 
             【本章创作结构】
             1. 钩子：开篇给出危机、异常、压迫、误解或悬念。
-            2. 压制：制造情绪下沉，让主角面对困难或不公平。
+            2. 压制：让主角面对困难或不公，但**用场面写体感**（对话顶撞、生理紧张、具体损失），避免只有交代设定没有心跳。
             3. 反转触发：用**情节层面的变化**制造跌宕（局势改写、信息翻盘、关键选择及后果、关系破裂或结盟等），至少一处要落在具体事件上；勿用密集「然而/其实/并非而是」类旁白句式替真正的剧情反转。
-            4. 高潮爆发：让冲突集中释放，节奏加快，情绪拉满。
+            4. 高潮爆发：冲突集中释放时，**情绪跟人物走**（台词、动作、后果），不单是旁白形容「很强很恐怖」。
             5. 余震：留下后续悬念，不要总结人生意义。
 
             【写作风格】
             - 总字数 2000-3000 字。
-            - 长短句交错，允许情绪断裂和风格突变。
+            - 长短句交错，允许情绪断裂；关键段落可有明显的快慢对比，避免通篇一个调门。
             - 加入1-2个真实生活细节。
             - 对话自然，人物行为符合设定但允许合理的矛盾和复杂性。
             - 严格保持核心角色名称稳定，不新增与核心角色高度相似的新名字。
@@ -169,7 +211,7 @@ public class NovelGenerationAgent {
             - 中间章节重生时，严禁推翻下一章已确定的关键事实（人物生死、地点、关键道具归属、阵营关系）。
 
             现在开始创作第%d章：
-            """, NarrativeCraftPrompts.chapterDraftHardRules(),
+            """, draftRules,
                 outline,
                 characterProfile,
                 buildImmutableConstraintsBlock(immutableConstraints),
@@ -184,8 +226,20 @@ public class NovelGenerationAgent {
     }
 
     public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline) {
-        log.info("【🤖 AI调用】开始生成角色设定 - 题材: {}, 设定长度: {}", topic, textLength(generationSetting));
+        return generateCharacterProfile(topic, generationSetting, pipeline, false);
+    }
+
+    public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled) {
+        log.info("【🤖 AI调用】开始生成角色设定 - 题材: {}, 设定长度: {}, hotMeme={}", topic, textLength(generationSetting), hotMemeEnabled);
         long startTime = System.currentTimeMillis();
+        String characterExtra = isShuangwenPipeline(pipeline)
+                ? NarrativeCraftPrompts.characterShuangwenUniversalBlock()
+                : "";
+        if (hotMemeEnabled) {
+            characterExtra = characterExtra.isEmpty()
+                    ? NarrativeCraftPrompts.hotMemeCharacterProfileBlock()
+                    : characterExtra + "\n" + NarrativeCraftPrompts.hotMemeCharacterProfileBlock();
+        }
 
         String prompt = String.format("""
             你是一位专业的角色设计师，擅长为各种题材创造立体丰满的角色。
@@ -201,6 +255,8 @@ public class NovelGenerationAgent {
             4. 设计1-2个对立角色，包含理念、冲突点、个人魅力、原则和底线。
             5. 给出角色互动关系图和叙述视角说明。
             6. 使用第三人称叙述说明。
+
+            %s
 
             【文风流水线】
             %s
@@ -225,7 +281,7 @@ public class NovelGenerationAgent {
               ]
             }
             严禁输出 markdown 代码块、解释文本、前后缀说明、额外字段。
-            """, topic, buildSettingBlock(generationSetting), styleGuide(pipeline));
+            """, topic, buildSettingBlock(generationSetting), characterExtra, styleGuide(pipeline));
 
         return callAi(prompt, startTime, "角色设定生成");
     }
@@ -328,8 +384,15 @@ public class NovelGenerationAgent {
         }
     }
 
-    private String deAiFinalize(String content, int chapterNumber, WritingPipeline pipeline) {
+    private String deAiFinalize(String content, int chapterNumber, WritingPipeline pipeline, boolean hotMemeEnabled) {
         long startTime = System.currentTimeMillis();
+        String deAiFocus = NarrativeCraftPrompts.deAiNarrativeFocusBlock();
+        if (isShuangwenPipeline(pipeline)) {
+            deAiFocus = deAiFocus + "\n" + NarrativeCraftPrompts.deAiShuangwenPreserveBlock();
+        }
+        if (hotMemeEnabled) {
+            deAiFocus = deAiFocus + "\n" + NarrativeCraftPrompts.deAiHotMemeTrimBlock();
+        }
         String prompt = String.format("""
             你是资深小说统稿编辑。请在不改变剧情事实的前提下，消除 AI 痕迹并保持文风统一。
 
@@ -347,8 +410,14 @@ public class NovelGenerationAgent {
             %s
 
             请返回最终正文，不要解释。
-            """, chapterNumber, pipeline == null ? WritingPipeline.POWER_FANTASY.name() : pipeline.name(), NarrativeCraftPrompts.deAiNarrativeFocusBlock(), content);
+            """, chapterNumber, pipeline == null ? WritingPipeline.POWER_FANTASY.name() : pipeline.name(), deAiFocus, content);
         return callAi(prompt, startTime, "终稿去AI味");
+    }
+
+    /** 默认流水线与 {@link WritingPipeline#POWER_FANTASY} 视为爽文网文向。 */
+    private static boolean isShuangwenPipeline(WritingPipeline pipeline) {
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        return p == WritingPipeline.POWER_FANTASY;
     }
 
     public String generateChapterSidecar(String chapterContent, String outline, int chapterNumber, WritingPipeline pipeline) {
@@ -388,10 +457,28 @@ public class NovelGenerationAgent {
                     - 侧重生活细节、关系推进、微冲突与温和节奏。
                     - 降低战力系统和宏大叙事比重，以人物日常成长为主。
                     """;
+            case PERIOD_DRAMA -> """
+                    文风目标：年代文（现实质感 + 时代气息）。
+                    - 强化时代细节：物资稀缺、票证/单位/邻里关系、人情往来、口号与宣传语的真实使用场景（少而准）。
+                    - 场景要有烟火气：吃穿住行、工作分配、家庭结构、邻里冲突与互助，细节必须具体可感。
+                    - 情绪表达克制而有后劲：少空泛煽情，多用动作与生活压力推动人物选择。
+                    - 冲突更偏“现实压迫/制度规则/人情秩序”而非纯战力碾压；爽点来自翻身、争取、守住体面与尊严。
+                    """;
+            case VULGAR -> """
+                    文风目标：粗俗风（更口语、更江湖气、更带刺的幽默）。
+                    - 允许脏话式语气与市井俚语，但避免露骨色情描写、仇恨歧视用语与恶意人身攻击。
+                    - 句子更短、更狠：吐槽、插科打诨、嘴上不饶人，但行动要讲逻辑与代价。
+                    - 对话要像“人吵架/人聊天”，可以打断、顶嘴、反问、冷笑；少文绉绉长段说教。
+                    - 爽点来自反击与翻盘，但不要靠降智与机械降神。
+                    """;
             default -> """
-                    文风目标：爽文主线。
-                    - 保留强冲突、强节奏、反转与高能场面。
-                    - 但避免机械爽点堆叠，保持人物动机可信。
+                    文风目标：爽文主线（通用网文，偏舒坦读感）。
+                    - 事件驱动：每章尽量让读者看清「阻碍—应对—结果」，结果可以是**小胜、脱身、拿到筹码、扳回体面**，不必依赖高频当众打脸。
+                    - 主角体验：可以受压，但避免连绵的公开羞辱与为虐而虐；憋屈要有代偿（机灵应对、底线、即时小翻盘或清晰反击预期）。
+                    - 节奏：强钩子开场，冲突有度；少用分隔线与碎片化短段凑合转折。
+                    - 对白：利落推进剧情；反派智力在线，少谜语演讲但也不必全员小丑化。
+                    - 克制 AI 腔：少用「不是…是…」对立定义句与空洞补丁句；比喻适可而止。
+                    - 战力与动机须可信：禁止无脑机械降神（与本篇叙事硬约束一致）。
                     """;
         };
     }

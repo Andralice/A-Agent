@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 
+/** {@link com.start.agent.model.ConsistencyAlert} 持久化。 */
 @Repository
 public interface ConsistencyAlertRepository extends JpaRepository<ConsistencyAlert, Long> {
     List<ConsistencyAlert> findByNovelIdOrderByCreateTimeDesc(Long novelId);

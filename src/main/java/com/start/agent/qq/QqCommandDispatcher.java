@@ -9,6 +9,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 
+/** 将解析后的 QQ 指令异步派发到 {@link com.start.agent.service.NovelAgentService}。 */
 @Slf4j
 @Service
 public class QqCommandDispatcher {

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+/** QQ 消息编排门面：鉴权、解析、分发命令并组装 HTTP 回调响应。 */
 @Slf4j
 @Service
 public class QqMessageFacade {

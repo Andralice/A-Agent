@@ -4,6 +4,7 @@ import lombok.Data;
 import java.util.ArrayList;
 import java.util.List;
 
+/** 由多条 {@link Event} 组成的情节因果链容器。 */
 @Data
 public class CausalChain {
     private List<Event> events = new ArrayList<>();

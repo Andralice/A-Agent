@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
 
+/**
+ * 角色档案实体：按小说维度存储姓名、设定 JSON 等，供生成与一致性约束使用。
+ */
 @Data
 @Entity
 @Table(name = "character_profile")

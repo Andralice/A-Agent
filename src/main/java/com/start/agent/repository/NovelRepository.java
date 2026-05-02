@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 import java.time.LocalDateTime;
 import java.util.List;
 
+/** {@link com.start.agent.model.Novel} 持久化。 */
 @Repository
 public interface NovelRepository extends JpaRepository<Novel, Long> {
     List<Novel> findByGroupId(Long groupId);

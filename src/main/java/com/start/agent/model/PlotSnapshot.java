@@ -5,6 +5,9 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
+/**
+ * 阶段性主线快照：通常按固定章节节点汇总剧情梗概，供长书记忆压缩。
+ */
 @Data
 @Entity
 @Table(name = "plot_snapshot", indexes = {

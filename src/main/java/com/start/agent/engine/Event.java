@@ -3,6 +3,7 @@ package com.start.agent.engine;
 import lombok.Data;
 import java.util.*;
 
+/** 世界观内的一条叙事事件：类型、原因、后果及牵涉角色。 */
 @Data
 public class Event {
     private String id;

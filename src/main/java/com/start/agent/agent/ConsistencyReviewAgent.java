@@ -6,6 +6,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
+/**
+ * 一致性审查 Agent：对照大纲与角色设定，压低设定漂移与因果硬伤。
+ */
 @Slf4j
 @Component
 public class ConsistencyReviewAgent {
@@ -17,10 +20,20 @@ public class ConsistencyReviewAgent {
         log.info("【AI代理初始化】ConsistencyReviewAgent 已就绪 (创新保护版)");
     }
 
-    public String reviewConsistency(String content, String outline, String characterProfile, 
+    public String reviewConsistency(String content, String outline, String characterProfile,
                                      int chapterNumber, String previousChaptersSummary) {
+        return reviewConsistency(content, outline, characterProfile, chapterNumber, previousChaptersSummary, "");
+    }
+
+    /**
+     * @param extraNarrativeReviewBlock 追加审查块（如爽文专审）；可为空。
+     */
+    public String reviewConsistency(String content, String outline, String characterProfile,
+                                     int chapterNumber, String previousChaptersSummary,
+                                     String extraNarrativeReviewBlock) {
         log.info("【🔍 一致性审查】开始审查第{}章内容的一致性", chapterNumber);
         long startTime = System.currentTimeMillis();
+        String extra = extraNarrativeReviewBlock == null ? "" : extraNarrativeReviewBlock;
 
         String prompt = String.format("""
             你是一位专业的网文主编，负责审查小说章节是否符合整体设定和大纲，
@@ -76,6 +89,7 @@ public class ConsistencyReviewAgent {
                - 只有在确实违背设定时才修改
                - 鼓励独特的叙事角度和表达方式
             %s
+            %s
             
             【处理方式】
             
@@ -101,7 +115,8 @@ public class ConsistencyReviewAgent {
             
             请返回审查修正后的内容：
             """, outline, characterProfile, previousChaptersSummary, chapterNumber, content,
-                NarrativeCraftPrompts.consistencyReviewNarrativeQualityBlock());
+                NarrativeCraftPrompts.consistencyReviewNarrativeQualityBlock(),
+                extra);
 
         log.debug("【🔍 一致性审查】提示词长度: {} 字符", prompt.length());
 

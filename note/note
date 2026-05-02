@@ -1,2 +1,11 @@
 "D:\解压\agent，ai\A-Agent\note\API接口总表.md"
 修筠
+mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+ssh -o ServerAliveInterval=60 -i ~/.ssh/id_ed25519 -L 3307:localhost:3306 -N -f alice@154.8.213.134
+.\note\deploy.ps1
+$env:SPRING_DATASOURCE_PASSWORD="My$qlR00t#2026"
+sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk
+$env:SPRING_DATASOURCE_PASSWORD='My$qlR00t#2026'
+$env:OPENAI_API_KEY='sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk'
+$env:OPENAI_BASE_URL='https://api.meai.cloud'
+mvn spring-boot:run "-Dspring-boot.run.profiles=local"

@@ -7,6 +7,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
+/** 一致性告警的持久化与查询。 */
 @Service
 public class ConsistencyAlertService {
     private final ConsistencyAlertRepository consistencyAlertRepository;

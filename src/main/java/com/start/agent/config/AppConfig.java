@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 
+/** 全局 Jackson {@link com.fasterxml.jackson.databind.ObjectMapper}（含 Java 8 时间类型）。 */
 @Configuration
 public class AppConfig {
 

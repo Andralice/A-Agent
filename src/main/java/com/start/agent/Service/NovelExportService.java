@@ -17,6 +17,7 @@ import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/** 将小说与章节导出为纯文本等格式，供下载或外部分发。 */
 @Slf4j
 @Service
 public class NovelExportService {

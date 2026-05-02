@@ -8,6 +8,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.List;
 
+/** 章节事实 CRUD 与查询：支撑剧情记忆、快照与新角色统计。 */
 @Service
 public class ChapterFactService {
     private final ChapterFactRepository chapterFactRepository;

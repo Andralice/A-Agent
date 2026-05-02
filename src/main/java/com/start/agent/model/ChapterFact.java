@@ -5,6 +5,9 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
+/**
+ * 章节事实表侧车数据：从正文抽取的实体/事件等结构化片段，用于记忆与新角色发现。
+ */
 @Data
 @Entity
 @Table(name = "chapter_fact", indexes = {

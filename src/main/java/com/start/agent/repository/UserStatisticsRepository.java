@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import java.util.List;
 import java.util.Optional;
 
+/** {@link com.start.agent.model.UserStatistics} 持久化。 */
 @Repository
 public interface UserStatisticsRepository extends JpaRepository<UserStatistics, Long> {
     

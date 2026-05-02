@@ -5,6 +5,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
 
+/**
+ * 单次生成调用日志：耗时、字数、成功失败等，用于统计与审计。
+ */
 @Data
 @Entity
 @Table(name = "generation_log")

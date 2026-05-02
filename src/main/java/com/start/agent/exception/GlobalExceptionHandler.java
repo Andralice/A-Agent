@@ -5,6 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+/**
+ * 全局异常处理：将未捕获异常转为 {@link com.start.agent.dto.ApiResponse}，避免裸栈迹直接暴露给客户端。
+ */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {

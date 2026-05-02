@@ -3,6 +3,7 @@ package com.start.agent.qq;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+/** 把群聊文本解析为 {@link QqCommand}（写书、续写、列表等斜杠指令）。 */
 @Slf4j
 @Component
 public class QqCommandParser {

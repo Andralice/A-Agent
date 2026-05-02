@@ -4,6 +4,7 @@ import lombok.Data;
 import java.util.HashMap;
 import java.util.Map;
 
+/** 地点及其环境因子（用于事件对环境的影响推演）。 */
 @Data
 public class LocationState {
     private String id;

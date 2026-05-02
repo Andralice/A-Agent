@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
 
+/**
+ * 单章实体：正文、章节号、本章附加设定及章节级写作状态。
+ */
 @Data
 @Entity
 @Table(name = "chapter", indexes = {

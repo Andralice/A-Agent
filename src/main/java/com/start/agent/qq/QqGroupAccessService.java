@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/** 按配置白名单限制响应哪些 QQ 群（未配置则放行所有群）。 */
 @Slf4j
 @Service
 public class QqGroupAccessService {

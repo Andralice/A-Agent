@@ -123,6 +123,8 @@
   - `power_fantasy` / 其他默认值
   - `light` / `light-novel` / `ln`
   - `slice` / `slice-of-life` / `daily`
+  - `period` / `period-drama` / `age` / `era` / `年代` / `年代文`
+  - `vulgar` / `rough` / `俗` / `粗俗` / `粗口`
 
 ### 7. 获取角色设定
 - 方法: `GET`
@@ -231,18 +233,27 @@
 ```json
 {
   "topic": "转生成为修仙界魔剑",
-  "generationSetting": "可选，用户补充设定"
+  "generationSetting": "可选，用户补充设定",
+  "hotMemeEnabled": false
 }
 ```
 - 字段说明:
   - `topic` (String, 必填)
   - `generationSetting` (String, 可选)
+  - `hotMemeEnabled` (Boolean, 可选，默认 `false`)：全书级「少量网络热梗」；仅影响**后续**生成，宜克制开启
 - 返回新增字段:
   - `novelId`: 新建小说 ID（立即落库）
   - `taskId`: 可恢复任务 ID
   - `taskType`: `INITIAL_BOOTSTRAP`
   
 > 说明：该任务可在进程重启后继续执行（任务入库 `generation_task`）。
+
+#### 16.1 调整全书热梗开关（不影响已生成章节）
+
+- 方法: `POST`
+- 路径: `/api/novel/{novelId}/hot-meme`
+- Body(JSON): `{ "enabled": true }`
+- 作用: 更新小说的 `hotMemeEnabled`；之后续写/重生等生成路径会按新开关拼接提示约束（已落库正文不会自动改写）。
 
 ### 17. 续写章节
 - 方法: `POST`
@@ -447,14 +458,18 @@
 - 支持 style:
   - `light` / `light-novel` / `ln` -> 轻小说
   - `slice` / `slice-of-life` / `daily` -> 日常向
+  - `period` / `period-drama` / `age` / `era` / `年代` / `年代文` -> 年代文
+  - `vulgar` / `rough` / `俗` / `粗俗` / `粗口` -> 粗俗风（口语/江湖气）
   - 其他值 -> 默认爽文
 - Body(JSON):
 ```json
 {
   "topic": "校园社团日常",
-  "generationSetting": "偏轻松、对白多"
+  "generationSetting": "偏轻松、对白多",
+  "hotMemeEnabled": false
 }
 ```
+- 可选字段 `hotMemeEnabled`：含义与上文「新建小说」接口相同；响应中会带回当前小说的 `hotMemeEnabled`。
 
 ### 2. 按文风入口续写
 - 方法: `POST`

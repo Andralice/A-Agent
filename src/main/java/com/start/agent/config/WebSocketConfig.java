@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Configuration;
 import java.net.URI;
 import java.util.concurrent.TimeUnit;
 
+/** 连接 NapCat WebSocket，并在就绪时注入 {@link com.start.agent.service.NapCatMessageService}。 */
 @Slf4j
 @Configuration
 public class WebSocketConfig {

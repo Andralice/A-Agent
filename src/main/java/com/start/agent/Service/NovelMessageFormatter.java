@@ -4,6 +4,7 @@ import com.start.agent.model.Chapter;
 import com.start.agent.model.Novel;
 import org.springframework.stereotype.Component;
 
+/** 将新书/新章格式化为适合推送到 QQ 群的文案。 */
 @Component
 public class NovelMessageFormatter {
     public String formatNovelMessage(Novel novel, Chapter chapter) {

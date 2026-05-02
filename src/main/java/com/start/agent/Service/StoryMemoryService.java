@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 
+/** 根据历史章节拼装「长期剧情记忆」文本块，注入到大模型上下文。 */
 @Service
 public class StoryMemoryService {
     public String buildStoryMemory(List<Chapter> chapters, List<String> lockedNames) {

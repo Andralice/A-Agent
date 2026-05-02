@@ -8,6 +8,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
+/**
+ * Spring Boot 入口：小说生成 Agent 后端（REST、QQ Webhook、定时任务、JPA）。
+ */
 @Slf4j
 @SpringBootApplication
 @EnableScheduling

@@ -30,7 +30,7 @@ spring:
   ai:
     openai:
       api-key: ${OPENAI_API_KEY:}
-      base-url: ${OPENAI_BASE_URL:http://114.132.99.114:3000}
+      base-url: ${OPENAI_BASE_URL:https://api.meai.cloud}
       chat:
         options:
           model: glm-5.1

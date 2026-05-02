@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.List;
 
+/** 定时清理长期未产出章节的空壳小说等维护任务。 */
 @Slf4j
 @Service
 public class CleanupService {

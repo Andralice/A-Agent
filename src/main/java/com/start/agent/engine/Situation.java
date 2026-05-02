@@ -2,6 +2,7 @@ package com.start.agent.engine;
 
 import lombok.Data;
 
+/** 场景紧迫度与交互类型的简单状态描述（供模拟器决策）。 */
 @Data
 public class Situation {
     private boolean threatDetected;

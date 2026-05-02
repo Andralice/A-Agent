@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 
+/** {@link com.start.agent.model.ChapterFact} 持久化。 */
 @Repository
 public interface ChapterFactRepository extends JpaRepository<ChapterFact, Long> {
     List<ChapterFact> findByNovelIdOrderByChapterNumberAscCreateTimeAsc(Long novelId);

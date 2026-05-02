@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+/** Spring AI {@link org.springframework.ai.chat.client.ChatClient} 与 OpenAI 兼容接口的 Bean 装配（模型、温度等）。 */
 @Slf4j
 @Configuration
 public class AiConfig {

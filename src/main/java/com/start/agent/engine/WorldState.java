@@ -4,6 +4,7 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 
+/** 单书世界观运行时快照：角色、地点、历史事件与全局规则。 */
 @Slf4j
 @Data
 public class WorldState {

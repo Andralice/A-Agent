@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 import java.util.List;
 import java.util.Optional;
 
+/** {@link com.start.agent.model.PlotSnapshot} 持久化。 */
 @Repository
 public interface PlotSnapshotRepository extends JpaRepository<PlotSnapshot, Long> {
     Optional<PlotSnapshot> findTopByNovelIdOrderBySnapshotChapterDesc(Long novelId);

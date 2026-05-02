@@ -3,6 +3,7 @@ package com.start.agent.engine;
 import lombok.Data;
 import java.util.*;
 
+/** 校验拟引入事件相对当前 {@link WorldState} 是否因果闭合、规则是否冲突。 */
 @Data
 public class CausalChainValidator {
 

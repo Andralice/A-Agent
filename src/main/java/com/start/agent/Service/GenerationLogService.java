@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/** 落库 {@link com.start.agent.model.GenerationLog}，记录每次章节生成的耗时与结果。 */
 @Slf4j
 @Service
 public class GenerationLogService {

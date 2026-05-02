@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 
+/** 按 QQ 群汇总字数与调用次数等统计信息。 */
 @Slf4j
 @Service
 public class UserStatisticsService {

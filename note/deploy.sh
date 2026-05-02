@@ -21,6 +21,9 @@ DB_URL="jdbc:mysql://127.0.0.1:3306/novel_agent?useUnicode=true&characterEncodin
 DB_USER="root"
 DB_PASS="${DB_PASS:-}"
 
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.meai.cloud}"
+
 JAVA_OPTS="${JAVA_OPTS:--Xms256m -Xmx768m}"
 APP_NAME="novel-agent"
 APP_ARGS="" # 例：--server.port=8080
@@ -29,8 +32,8 @@ REMOTE_LOG="${REMOTE_DIR}/${APP_NAME}.log"
 REMOTE_PID_FILE="${REMOTE_DIR}/${APP_NAME}.pid"
 
 _remote_exports() {
-  printf 'export REMOTE_DIR=%q JAR_NAME=%q REMOTE_LOG=%q REMOTE_PID_FILE=%q DB_URL=%q DB_USER=%q DB_PASS=%q JAVA_OPTS=%q APP_ARGS=%q\n' \
-    "${REMOTE_DIR}" "${JAR_NAME}" "${REMOTE_LOG}" "${REMOTE_PID_FILE}" "${DB_URL}" "${DB_USER}" "${DB_PASS}" "${JAVA_OPTS}" "${APP_ARGS:-}"
+  printf 'export REMOTE_DIR=%q JAR_NAME=%q REMOTE_LOG=%q REMOTE_PID_FILE=%q DB_URL=%q DB_USER=%q DB_PASS=%q OPENAI_API_KEY=%q OPENAI_BASE_URL=%q JAVA_OPTS=%q APP_ARGS=%q\n' \
+    "${REMOTE_DIR}" "${JAR_NAME}" "${REMOTE_LOG}" "${REMOTE_PID_FILE}" "${DB_URL}" "${DB_USER}" "${DB_PASS}" "${OPENAI_API_KEY}" "${OPENAI_BASE_URL}" "${JAVA_OPTS}" "${APP_ARGS:-}"
 }
 
 echo "==> [1/5] Maven 打包"
@@ -47,6 +50,12 @@ fi
 if [[ -z "${DB_PASS}" ]]; then
   echo "❌ 未设置 DB_PASS。请先在本机环境变量中提供数据库密码，再运行部署脚本。"
   echo "   例: export DB_PASS='your_password'"
+  exit 1
+fi
+
+if [[ -z "${OPENAI_API_KEY}" ]]; then
+  echo "❌ 未设置 OPENAI_API_KEY。请先在本机环境变量中提供密钥，再运行部署脚本。"
+  echo "   例: export OPENAI_API_KEY='sk-xxx'"
   exit 1
 fi
 
@@ -87,6 +96,8 @@ ssh "${REMOTE_USER}@${REMOTE_HOST}" "$(_remote_exports); bash -s" <<'EOS'
 set -euo pipefail
 cd "${REMOTE_DIR}"
 export SPRING_DATASOURCE_PASSWORD="${DB_PASS}"
+export OPENAI_API_KEY="${OPENAI_API_KEY}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL}"
 nohup env SPRING_PROFILES_ACTIVE= \
   java ${JAVA_OPTS} -jar "${JAR_NAME}" \
   --spring.datasource.url="${DB_URL}" \

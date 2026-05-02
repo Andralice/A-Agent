@@ -19,6 +19,9 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 小说创作领域核心服务：开书/续写/重生、任务编排、章节与角色落库、与 QQ 推送等入口的业务封装。
+ */
 @Slf4j
 @Service
 public class NovelAgentService {
@@ -89,17 +92,22 @@ public class NovelAgentService {
     }
 
     public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline) {
+        processAndSend(groupId, topic, setting, pipeline, false);
+    }
+
+    public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled) {
         Long novelId = null;
         try {
-            Novel novel = createNovel(groupId, topic, setting, pipeline);
+            Novel novel = createNovel(groupId, topic, setting, pipeline, hotMemeEnabled);
             novelId = novel.getId();
             writingProgressService.beginOperation(novelId, NovelWritePhase.INITIAL_BOOTSTRAP, 1, INIT_CHAPTERS);
             WritingPipeline effectivePipeline = resolvePipeline(novel);
-            String outline = generationAgent.generateOutline(topic, setting, effectivePipeline);
-            String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline);
+            boolean hotMeme = novel.isHotMemeEnabled();
+            String outline = generationAgent.generateOutline(topic, setting, effectivePipeline, hotMeme);
+            String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline, hotMeme);
             generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
             updateNovelDescription(novelId, outline);
-            int savedProfiles = persistCharacterProfilesStrict(novelId, topic, setting, effectivePipeline, profile);
+            int savedProfiles = persistCharacterProfilesStrict(novelId, topic, setting, effectivePipeline, profile, hotMeme);
             generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
                     savedProfiles > 0 ? "success" : "failed",
                     savedProfiles > 0 ? null : "strict json parse failed");
@@ -139,15 +147,15 @@ public class NovelAgentService {
         boolean outlineReady = novel.getDescription() != null && !novel.getDescription().isBlank()
                 && !"AI generated novel".equals(novel.getDescription()) && !"AI生成的爽文小说".equals(novel.getDescription());
         if (!outlineReady) {
-            String outline = generationAgent.generateOutline(novel.getTopic(), setting, pipeline);
+            String outline = generationAgent.generateOutline(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled());
             generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
             updateNovelDescription(novelId, outline);
         }
 
         // Profiles
         if (!characterProfileService.hasUsableProfiles(novelId)) {
-            String profile = generationAgent.generateCharacterProfile(novel.getTopic(), setting, pipeline);
-            int savedProfiles = persistCharacterProfilesStrict(novelId, novel.getTopic(), setting, pipeline, profile);
+            String profile = generationAgent.generateCharacterProfile(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled());
+            int savedProfiles = persistCharacterProfilesStrict(novelId, novel.getTopic(), setting, pipeline, profile, novel.isHotMemeEnabled());
             generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
                     savedProfiles > 0 ? "success" : "failed",
                     savedProfiles > 0 ? null : "strict json parse failed");
@@ -340,7 +348,7 @@ public class NovelAgentService {
             for (int attempt = 1; attempt <= 2; attempt++) {
                 try {
                     String repairSetting = buildCharacterRepairSetting(novel, effectiveOptions);
-                    String profileText = generationAgent.generateCharacterProfile(novel.getTopic(), repairSetting, pipeline);
+                    String profileText = generationAgent.generateCharacterProfile(novel.getTopic(), repairSetting, pipeline, false);
                     boolean replaceAll = effectiveOptions.rebuildMode == RebuildMode.ALL;
                     int savedProfiles = characterProfileService.saveCharacterProfilesJsonWithMode(
                             novel.getId(),
@@ -434,7 +442,8 @@ public class NovelAgentService {
                 novelSetting,
                 chapterSetting,
                 immutableConstraints,
-                pipeline
+                pipeline,
+                novel.isHotMemeEnabled()
         );
         if (content == null || content.trim().isEmpty()) throw new RuntimeException("AI生成失败：返回内容为空");
         String issueHint = entityConsistencyService.detectNameConsistencyIssue(previousContent, content, lockRules);
@@ -510,11 +519,16 @@ public class NovelAgentService {
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting) {
-        return createNovel(groupId, topic, setting, WritingPipeline.POWER_FANTASY);
+        return createNovel(groupId, topic, setting, WritingPipeline.POWER_FANTASY, false);
     }
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline) {
+        return createNovel(groupId, topic, setting, pipeline, false);
+    }
+
+    @Transactional
+    public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled) {
         Novel n = new Novel();
         n.setTitle(title(topic));
         n.setTopic(topic);
@@ -522,7 +536,15 @@ public class NovelAgentService {
         n.setGroupId(groupId);
         n.setDescription("AI generated novel");
         n.setWritingPipeline((pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline).name());
+        n.setHotMemeEnabled(hotMemeEnabled);
         return novelRepository.save(n);
+    }
+
+    @Transactional
+    public void updateHotMemeEnabled(Long novelId, boolean enabled) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new IllegalArgumentException("novel not found: " + novelId));
+        novel.setHotMemeEnabled(enabled);
+        novelRepository.save(novel);
     }
 
     @Transactional
@@ -571,12 +593,12 @@ public class NovelAgentService {
         }
     }
 
-    private int persistCharacterProfilesStrict(Long novelId, String topic, String setting, WritingPipeline pipeline, String firstResult) {
+    private int persistCharacterProfilesStrict(Long novelId, String topic, String setting, WritingPipeline pipeline, String firstResult, boolean hotMemeEnabled) {
         int saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, firstResult);
         if (saved > 0) return saved;
         for (int attempt = 1; attempt <= 2; attempt++) {
             String retryPromptSetting = (setting == null ? "" : setting + "\n") + "【输出要求】必须返回严格JSON对象，字段仅包含 characters/name/type/want/fear/knowledge/summary。";
-            String retryResult = generationAgent.generateCharacterProfile(topic, retryPromptSetting, pipeline);
+            String retryResult = generationAgent.generateCharacterProfile(topic, retryPromptSetting, pipeline, hotMemeEnabled);
             saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, retryResult);
             if (saved > 0) return saved;
         }

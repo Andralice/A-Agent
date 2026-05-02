@@ -14,6 +14,9 @@ import org.springframework.web.bind.annotation.*;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
+/**
+ * NapCat/QQ 回调入口：接收群消息 webhook、转 {@link com.start.agent.qq.QqMessageFacade}，并提供管理员清理等接口。
+ */
 @Slf4j
 @RestController
 @RequestMapping("/api/qq")

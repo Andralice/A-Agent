@@ -7,6 +7,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import javax.sql.DataSource;
 
+/** 数据源 Bean：可带连接失败重试，便于容器/MySQL 晚于应用就绪时的启动场景。 */
 @Slf4j
 @Configuration
 public class DatabaseRetryConfig {

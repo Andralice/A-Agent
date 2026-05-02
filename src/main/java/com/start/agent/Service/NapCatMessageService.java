@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashMap;
 import java.util.Map;
 
+/** 通过 WebSocket 连接 NapCat，向指定 QQ 群发送文本消息。 */
 @Slf4j
 @Service
 public class NapCatMessageService {

@@ -17,6 +17,9 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 角色档案解析与规范化：从大模型文本中提取结构化字段、去重合并、写入 {@link com.start.agent.model.CharacterProfile}。
+ */
 @Slf4j
 @Service
 public class CharacterProfileService {

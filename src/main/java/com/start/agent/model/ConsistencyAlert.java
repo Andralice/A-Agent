@@ -5,6 +5,9 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 
+/**
+ * 一致性告警记录：某章检测到的设定冲突或风险描述，供监控与排查。
+ */
 @Data
 @Entity
 @Table(name = "consistency_alert", indexes = {

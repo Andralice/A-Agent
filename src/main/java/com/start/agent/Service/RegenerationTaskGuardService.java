@@ -7,6 +7,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 进程内章节区间互斥锁：防止同一小说的重叠重生/续写任务并发踩同一批章节。
+ */
 @Service
 public class RegenerationTaskGuardService {
     private final Map<Long, List<Range>> runningRangesByNovel = new ConcurrentHashMap<>();

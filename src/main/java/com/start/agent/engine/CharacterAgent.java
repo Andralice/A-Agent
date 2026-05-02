@@ -3,6 +3,7 @@ package com.start.agent.engine;
 import lombok.Data;
 import java.util.*;
 
+/** 模拟器中的角色模型：动机、恐惧、知情范围与关系边（非数据库实体）。 */
 @Data
 public class CharacterAgent {
     private String id;

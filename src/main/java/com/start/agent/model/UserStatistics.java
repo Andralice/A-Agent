@@ -5,6 +5,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
 
+/**
+ * QQ 群维度用量统计：本群小说数、章节数、字数、调用次数等。
+ */
 @Data
 @Entity
 @Table(name = "user_statistics")

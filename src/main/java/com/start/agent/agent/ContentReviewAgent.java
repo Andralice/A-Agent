@@ -5,6 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
+/**
+ * 内容安全与合规审查 Agent：对正文做风险扫描与必要修补（偏政策与尺度）。
+ */
 @Slf4j
 @Component
 public class ContentReviewAgent {

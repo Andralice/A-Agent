@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+/** 在关键章节节点生成/刷新 {@link com.start.agent.model.PlotSnapshot}，压缩长篇主线信息。 */
 @Service
 public class PlotSnapshotService {
     private final PlotSnapshotRepository plotSnapshotRepository;

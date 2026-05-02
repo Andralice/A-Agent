@@ -20,6 +20,9 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 生成任务编排与恢复：创建任务、更新进度、应用启动后续跑 PENDING/RUNNING、并发区间冲突检测辅助。
+ */
 @Slf4j
 @Service
 public class GenerationTaskService {

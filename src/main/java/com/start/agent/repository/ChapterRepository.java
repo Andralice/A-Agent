@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.Optional;
 
+/** {@link com.start.agent.model.Chapter} 持久化与批量状态更新查询。 */
 @Repository
 public interface ChapterRepository extends JpaRepository<Chapter, Long> {
     List<Chapter> findByNovelIdOrderByChapterNumberAsc(Long novelId);

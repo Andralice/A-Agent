@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
 
+/**
+ * 小说聚合根实体：标题、题材、生成设定、文风流水线、写作工作台状态、全书热梗开关等。
+ */
 @Data
 @Entity
 @Table(name = "novel", indexes = {
@@ -30,6 +33,10 @@ public class Novel {
 
     @Column(name = "writing_pipeline", length = 40)
     private String writingPipeline;
+
+    /** 是否在正文适当位置少量使用网络热梗（前端可开关；默认关闭）。 */
+    @Column(name = "hot_meme_enabled", nullable = false, columnDefinition = "tinyint(1) NOT NULL DEFAULT 0")
+    private boolean hotMemeEnabled = false;
 
     @Column(name = "user_id")
     private Long userId;

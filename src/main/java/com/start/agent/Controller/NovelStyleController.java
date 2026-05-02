@@ -13,6 +13,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * HTTP API：按「文风 URL 段」创建小说并续写，内部映射为 {@link WritingPipeline}。
+ */
 @Slf4j
 @RestController
 @RequestMapping("/api/novel-style")
@@ -37,9 +40,11 @@ public class NovelStyleController {
                 return error("INVALID_ARGUMENT", "题材不能为空");
             }
             WritingPipeline pipeline = WritingPipeline.fromPath(style);
-            CompletableFuture.runAsync(() -> agentService.processAndSend(0L, request.getTopic(), request.getGenerationSetting(), pipeline));
+            boolean hotMeme = Boolean.TRUE.equals(request.getHotMemeEnabled());
+            CompletableFuture.runAsync(() -> agentService.processAndSend(0L, request.getTopic(), request.getGenerationSetting(), pipeline, hotMeme));
             Map<String, Object> data = new HashMap<>();
             data.put("pipeline", pipeline.name());
+            data.put("hotMemeEnabled", hotMeme);
             return success("风格化创作任务已启动", data);
         } catch (Exception e) {
             return error("STYLE_CREATE_TASK_FAILED", e.getMessage());
@@ -89,6 +94,7 @@ public class NovelStyleController {
     static class CreateRequest {
         private String topic;
         private String generationSetting;
+        private Boolean hotMemeEnabled;
     }
 
     @Data

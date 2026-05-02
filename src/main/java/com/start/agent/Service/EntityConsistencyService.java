@@ -12,6 +12,9 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 从角色档案等构造「不可违背约束」与姓名锁定规则，减少生成时吃设定。
+ */
 @Service
 public class EntityConsistencyService {
     private static final Pattern CHINESE_NAME = Pattern.compile("(?<![\\p{IsHan}])([\\p{IsHan}]{2,4})(?![\\p{IsHan}])");

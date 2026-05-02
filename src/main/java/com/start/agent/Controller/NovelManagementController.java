@@ -31,6 +31,9 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * HTTP API：小说 CRUD、开书/续写/自动续写、重生、导出、进度与监控、流水线切换等。
+ */
 @Slf4j
 @RestController
 @RequestMapping("/api/novel")
@@ -78,6 +81,21 @@ public class NovelManagementController {
         result.put("novelId", novelId);
         result.put("pipeline", novel.getWritingPipeline() == null ? WritingPipeline.POWER_FANTASY.name() : novel.getWritingPipeline());
         return result;
+    }
+
+    /** 开关：是否在正文适当位置少量使用网络热梗（后续续写/重生章节生效；已写章节不变）。 */
+    @PostMapping("/{novelId}/hot-meme")
+    public Map<String, Object> updateHotMeme(@PathVariable Long novelId, @RequestBody(required = false) HotMemeRequest request) {
+        try {
+            boolean enabled = request != null && Boolean.TRUE.equals(request.getEnabled());
+            agentService.updateHotMemeEnabled(novelId, enabled);
+            Map<String, Object> data = new HashMap<>();
+            data.put("novelId", novelId);
+            data.put("hotMemeEnabled", enabled);
+            return success("网络热梗开关已更新（仅影响后续生成）", data);
+        } catch (Exception e) {
+            return error("HOT_MEME_UPDATE_FAILED", e.getMessage());
+        }
     }
 
     @PostMapping("/{novelId}/pipeline")
@@ -398,7 +416,8 @@ public class NovelManagementController {
         try {
             if (request == null || request.getTopic() == null || request.getTopic().trim().isEmpty()) return error("INVALID_ARGUMENT", "题材不能为空");
             // 先落库小说记录，再用可恢复任务驱动首次生成（避免进程中断丢任务）
-            Novel novel = agentService.createNovel(0L, request.getTopic(), request.getGenerationSetting());
+            boolean hotMeme = Boolean.TRUE.equals(request.getHotMemeEnabled());
+            Novel novel = agentService.createNovel(0L, request.getTopic(), request.getGenerationSetting(), WritingPipeline.POWER_FANTASY, hotMeme);
             GenerationTask task = generationTaskService.enqueueInitialBootstrapTask(novel.getId(), 5);
             generationTaskService.executeAsync(task.getId());
             Map<String, Object> data = new HashMap<>();
@@ -535,7 +554,16 @@ public class NovelManagementController {
         return result;
     }
 
-    @Data static class CreateRequest { private String topic; private String generationSetting; }
+    @Data static class CreateRequest {
+        private String topic;
+        private String generationSetting;
+        /** 是否开启「少量网络热梗」模式；默认 false。 */
+        private Boolean hotMemeEnabled;
+    }
+
+    @Data static class HotMemeRequest {
+        private Boolean enabled;
+    }
     @Data static class ContinueRequest { private Integer chapterNumber; private String generationSetting; }
     @Data static class AutoContinueRequest { private Integer targetChapterCount; private String generationSetting; }
     @Data static class RegenerateRequest { private String generationSetting; }

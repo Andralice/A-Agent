@@ -4,6 +4,9 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 
+/**
+ * 叙事因果模拟入口（实验性）：驱动 {@link WorldState} 与 {@link CausalChainValidator} 推演事件链。
+ */
 @Slf4j
 public class WorldSimulator {
     

@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.Collection;
 import java.util.List;
 
+/** {@link com.start.agent.model.GenerationTask} 持久化与按状态查询。 */
 @Repository
 public interface GenerationTaskRepository extends JpaRepository<GenerationTask, Long> {
     List<GenerationTask> findByNovelIdOrderByCreateTimeDesc(Long novelId);
