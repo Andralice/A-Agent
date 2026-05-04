@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -31,6 +32,13 @@ public class GenerationTaskService {
             GenerationTaskStatus.PENDING.name(),
             GenerationTaskStatus.RUNNING.name()
     );
+    /** 与章节正文生成互斥的类型（不含大纲租约）。 */
+    private static final List<String> CHAPTER_TASK_TYPES = List.of(
+            GenerationTaskType.INITIAL_BOOTSTRAP.name(),
+            GenerationTaskType.CONTINUE_SINGLE.name(),
+            GenerationTaskType.AUTO_CONTINUE_RANGE.name(),
+            GenerationTaskType.REGENERATE_RANGE.name()
+    );
 
     private final GenerationTaskRepository generationTaskRepository;
     private final ChapterRepository chapterRepository;
@@ -46,6 +54,57 @@ public class GenerationTaskService {
         this.chapterRepository = chapterRepository;
         this.novelAgentService = novelAgentService;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 占用大纲重写 DB 租约（RUNNING），禁止并发章节类任务；调用方应先在本进程取得大纲区间锁，再调用本方法。
+     *
+     * @return 任务 id，结束时调用 {@link #releaseOutlineRegenerationLease(Long)}
+     */
+    @Transactional
+    public Long attachOutlineRegenerationLease(Long novelId) {
+        Objects.requireNonNull(novelId, "novelId");
+        assertNoChapterGenerationLease(novelId);
+        assertNoOutlineRegenerationLease(novelId);
+        LocalDateTime now = LocalDateTime.now();
+        GenerationTask task = new GenerationTask();
+        task.setNovelId(novelId);
+        task.setTaskType(GenerationTaskType.OUTLINE_REGENERATE.name());
+        task.setRangeFrom(0);
+        task.setRangeTo(0);
+        task.setCurrentChapter(0);
+        task.setPayloadJson("{}");
+        task.setStatus(GenerationTaskStatus.RUNNING.name());
+        task.setStartedAt(now);
+        task.setHeartbeatAt(now);
+        return generationTaskRepository.save(task).getId();
+    }
+
+    @Transactional
+    public void releaseOutlineRegenerationLease(Long taskId) {
+        if (taskId == null) return;
+        generationTaskRepository.findById(taskId).ifPresent(t -> {
+            if (GenerationTaskType.OUTLINE_REGENERATE.name().equals(t.getTaskType())) {
+                markDone(taskId);
+            }
+        });
+    }
+
+    @Transactional(readOnly = true)
+    public void assertNoChapterGenerationLease(Long novelId) {
+        long n = generationTaskRepository.countActiveByNovelAndTaskTypes(novelId, ACTIVE_STATUSES, CHAPTER_TASK_TYPES);
+        if (n > 0) {
+            throw new IllegalStateException("本书存在进行中的章节生成任务，请等待结束后再修改大纲");
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public void assertNoOutlineRegenerationLease(Long novelId) {
+        long n = generationTaskRepository.countActiveByNovelAndTaskTypes(novelId, ACTIVE_STATUSES,
+                List.of(GenerationTaskType.OUTLINE_REGENERATE.name()));
+        if (n > 0) {
+            throw new IllegalStateException("本书正在重新生成大纲，请稍后再提交章节类生成任务");
+        }
     }
 
     public GenerationTask enqueueContinueTask(Long novelId, Integer chapterNumber, String generationSetting) {
@@ -170,6 +229,7 @@ public class GenerationTaskService {
         if (t.getRangeFrom() != null && t.getRangeTo() != null) {
             ensureNoActiveOverlap(t.getNovelId(), t.getRangeFrom(), t.getRangeTo(), t.getId());
         }
+        assertNoOutlineRegenerationLease(t.getNovelId());
         t.setStatus(GenerationTaskStatus.PENDING.name());
         t.setLastError(null);
         t.setFinishedAt(null);
@@ -205,8 +265,15 @@ public class GenerationTaskService {
             }
             task = generationTaskRepository.findById(taskId).orElse(null);
             if (task == null) return;
-            runTaskByType(task);
-            markDone(taskId);
+            LocalDateTime claimStamp = task.getStartedAt();
+            if (claimStamp == null) {
+                log.warn("generation task claimed but startedAt is null, skip run taskId={}", taskId);
+                return;
+            }
+            boolean finishedAll = runTaskByType(task, claimStamp);
+            if (finishedAll) {
+                markDone(taskId);
+            }
         } catch (Exception e) {
             log.error("generation task failed, taskId={}", taskId, e);
             markFailed(taskId, e.getMessage());
@@ -215,8 +282,16 @@ public class GenerationTaskService {
         }
     }
 
-    private void runTaskByType(GenerationTask task) {
+    /**
+     * @param claimStamp 本次成功 claim 后 DB 中的 {@link GenerationTask#getStartedAt()}，用于每章前识别是否仍由本执行持有（另一实例重新 claim 会刷新 startedAt）。
+     * @return 全部章节（或 bootstrap）按预期跑完且未丢失 lease；否则不调用 {@link #markDone(Long)}。
+     */
+    private boolean runTaskByType(GenerationTask task, LocalDateTime claimStamp) {
         GenerationTaskType type = GenerationTaskType.valueOf(task.getTaskType());
+        if (type == GenerationTaskType.OUTLINE_REGENERATE) {
+            log.info("outline regeneration lease recovered/cleared by worker, taskId={}", task.getId());
+            return true;
+        }
         Long novelId = task.getNovelId();
         Map<String, Object> payload = parsePayload(task.getPayloadJson());
         String generationSetting = payload.get("generationSetting") == null ? null : String.valueOf(payload.get("generationSetting"));
@@ -224,16 +299,28 @@ public class GenerationTaskService {
         int to = task.getRangeTo() == null ? from : task.getRangeTo();
         int start = task.getCurrentChapter() == null ? from : Math.max(from, task.getCurrentChapter() + 1);
         if (type == GenerationTaskType.INITIAL_BOOTSTRAP) {
+            if (!stillOwnsLease(task.getId(), claimStamp)) {
+                log.info("generation task lease lost before bootstrap, taskId={}", task.getId());
+                return false;
+            }
             int target = payload.get("targetChapterCount") instanceof Number ? ((Number) payload.get("targetChapterCount")).intValue() : to;
             // 先补齐 outline + profile，再按章补齐到目标章节
             novelAgentService.bootstrapNovel(DEFAULT_GROUP_ID, novelId, Math.max(1, target));
+            if (!stillOwnsLease(task.getId(), claimStamp)) {
+                log.info("generation task lease lost after bootstrap, taskId={}", task.getId());
+                return false;
+            }
             updateHeartbeat(task.getId(), Math.max(0, target));
-            return;
+            return stillOwnsLease(task.getId(), claimStamp);
         }
         for (int chapter = start; chapter <= to; chapter++) {
+            if (!stillOwnsLease(task.getId(), claimStamp)) {
+                log.info("generation task lease lost mid-run, taskId={}, stop before chapter={}", task.getId(), chapter);
+                return false;
+            }
             if (isCancelled(task.getId())) {
                 log.info("generation task cancelled mid-run, taskId={}, stop at chapter={}", task.getId(), chapter);
-                return;
+                return false;
             }
             switch (type) {
                 case CONTINUE_SINGLE, AUTO_CONTINUE_RANGE ->
@@ -243,6 +330,16 @@ public class GenerationTaskService {
             }
             updateHeartbeat(task.getId(), chapter);
         }
+        return stillOwnsLease(task.getId(), claimStamp);
+    }
+
+    /** 仍为 RUNNING 且 startedAt 与本次 claim 一致，表示未被另一实例重新领取。 */
+    private boolean stillOwnsLease(Long taskId, LocalDateTime claimStartedAt) {
+        if (taskId == null || claimStartedAt == null) return false;
+        return generationTaskRepository.findById(taskId)
+                .map(t -> GenerationTaskStatus.RUNNING.name().equals(t.getStatus())
+                        && Objects.equals(claimStartedAt, t.getStartedAt()))
+                .orElse(false);
     }
 
     @Transactional
@@ -324,6 +421,7 @@ public class GenerationTaskService {
     }
 
     private void ensureNoActiveOverlap(Long novelId, int from, int to, Long ignoreTaskId) {
+        assertNoOutlineRegenerationLease(novelId);
         int lo = Math.min(from, to);
         int hi = Math.max(from, to);
         long overlap = generationTaskRepository.countActiveOverlap(novelId, lo, hi, ACTIVE_STATUSES);

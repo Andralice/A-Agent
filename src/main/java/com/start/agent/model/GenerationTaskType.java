@@ -7,5 +7,7 @@ public enum GenerationTaskType {
     INITIAL_BOOTSTRAP,
     CONTINUE_SINGLE,
     AUTO_CONTINUE_RANGE,
-    REGENERATE_RANGE
+    REGENERATE_RANGE,
+    /** 仅占位租约：大纲重新生成进行中，禁止并发章节类任务（跨实例可见）。 */
+    OUTLINE_REGENERATE
 }

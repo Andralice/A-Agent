@@ -1,17 +1,29 @@
 package com.start.agent.service;
 
 import com.start.agent.agent.NovelGenerationAgent;
+import com.start.agent.agent.OutlineGenerationResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.model.Chapter;
+import com.start.agent.model.ChapterFact;
 import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.Novel;
 import com.start.agent.model.NovelWritePhase;
+import com.start.agent.model.PlotSnapshot;
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.model.WritingStyleHints;
+import com.start.agent.narrative.NarrativeEngineArtifactSink;
+import com.start.agent.narrative.NarrativePhysicsMode;
+import com.start.agent.narrative.NarrativeProfile;
+import com.start.agent.narrative.NarrativeProfileResolver;
+import com.start.agent.exception.NotFoundException;
 import com.start.agent.repository.ChapterRepository;
 import com.start.agent.repository.NovelRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -42,13 +54,19 @@ public class NovelAgentService {
     private final ChapterFactService chapterFactService;
     private final PlotSnapshotService plotSnapshotService;
     private final RegenerationTaskGuardService regenerationTaskGuardService;
+    private final GenerationTaskService generationTaskService;
     private final WritingProgressService writingProgressService;
     private final NewCharacterIngestService newCharacterIngestService;
     private final NovelMessageFormatter novelMessageFormatter;
     private final NovelExportService novelExportService;
+    private final NarrativeProfileResolver narrativeProfileResolver;
     private final int defaultAutoContinueTarget;
     private final int maxAutoContinueTarget;
     private final ObjectMapper objectMapper;
+    private final boolean narrativeEngineEnabled;
+    private final boolean narrativeM4CarryoverEnabled;
+    private final boolean narrativeM7ArtifactEnabled;
+    private final boolean narrativeM9CrosscutEnabled;
 
     public NovelAgentService(NapCatMessageService messageService, NovelGenerationAgent generationAgent, NovelRepository novelRepository,
                              ChapterRepository chapterRepository, GenerationLogService generationLogService, UserStatisticsService userStatisticsService,
@@ -57,12 +75,18 @@ public class NovelAgentService {
                              ConsistencyAlertService consistencyAlertService, ChapterFactService chapterFactService,
                              PlotSnapshotService plotSnapshotService,
                              RegenerationTaskGuardService regenerationTaskGuardService,
+                             @Lazy GenerationTaskService generationTaskService,
                              WritingProgressService writingProgressService,
                              NewCharacterIngestService newCharacterIngestService,
                              @Value("${novel.auto-continue.default-target:20}") int defaultAutoContinueTarget,
                              @Value("${novel.auto-continue.max-target:200}") int maxAutoContinueTarget,
                              NovelMessageFormatter novelMessageFormatter, NovelExportService novelExportService,
-                             ObjectMapper objectMapper) {
+                             NarrativeProfileResolver narrativeProfileResolver,
+                             ObjectMapper objectMapper,
+                             @Value("${novel.narrative-engine.enabled:true}") boolean narrativeEngineEnabled,
+                             @Value("${novel.narrative-engine.m4-carryover-enabled:true}") boolean narrativeM4CarryoverEnabled,
+                             @Value("${novel.narrative-engine.m7-artifact-enabled:true}") boolean narrativeM7ArtifactEnabled,
+                             @Value("${novel.narrative-engine.m9-crosscut-enabled:false}") boolean narrativeM9CrosscutEnabled) {
         this.messageService = messageService;
         this.generationAgent = generationAgent;
         this.novelRepository = novelRepository;
@@ -76,13 +100,19 @@ public class NovelAgentService {
         this.chapterFactService = chapterFactService;
         this.plotSnapshotService = plotSnapshotService;
         this.regenerationTaskGuardService = regenerationTaskGuardService;
+        this.generationTaskService = generationTaskService;
         this.writingProgressService = writingProgressService;
         this.newCharacterIngestService = newCharacterIngestService;
         this.defaultAutoContinueTarget = Math.max(1, defaultAutoContinueTarget);
         this.maxAutoContinueTarget = Math.max(this.defaultAutoContinueTarget, Math.max(1, maxAutoContinueTarget));
         this.novelMessageFormatter = novelMessageFormatter;
         this.novelExportService = novelExportService;
+        this.narrativeProfileResolver = narrativeProfileResolver;
         this.objectMapper = objectMapper;
+        this.narrativeEngineEnabled = narrativeEngineEnabled;
+        this.narrativeM4CarryoverEnabled = narrativeM4CarryoverEnabled;
+        this.narrativeM7ArtifactEnabled = narrativeM7ArtifactEnabled;
+        this.narrativeM9CrosscutEnabled = narrativeM9CrosscutEnabled;
     }
 
     public void processAndSend(Long groupId, String topic) { processAndSend(groupId, topic, null, WritingPipeline.POWER_FANTASY); }
@@ -92,22 +122,44 @@ public class NovelAgentService {
     }
 
     public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline) {
-        processAndSend(groupId, topic, setting, pipeline, false);
+        processAndSend(groupId, topic, setting, pipeline, false, null);
     }
 
     public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled) {
+        processAndSend(groupId, topic, setting, pipeline, hotMemeEnabled, null, null, null, null, null);
+    }
+
+    public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                               String writingStyleParamsJson) {
+        processAndSend(groupId, topic, setting, pipeline, hotMemeEnabled, writingStyleParamsJson, null, null, null, null);
+    }
+
+    public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                               String writingStyleParamsJson, String serializationPlatform, String creatorNote) {
+        processAndSend(groupId, topic, setting, pipeline, hotMemeEnabled, writingStyleParamsJson, serializationPlatform, creatorNote, null, null);
+    }
+
+    public void processAndSend(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                               String writingStyleParamsJson, String serializationPlatform, String creatorNote,
+                               Integer outlineDetailedPrefixChapters, Integer outlineMinRoadmapChapters) {
         Long novelId = null;
         try {
-            Novel novel = createNovel(groupId, topic, setting, pipeline, hotMemeEnabled);
+            Novel novel = createNovel(groupId, topic, setting, pipeline, hotMemeEnabled, writingStyleParamsJson, serializationPlatform, creatorNote,
+                    outlineDetailedPrefixChapters, outlineMinRoadmapChapters);
             novelId = novel.getId();
             writingProgressService.beginOperation(novelId, NovelWritePhase.INITIAL_BOOTSTRAP, 1, INIT_CHAPTERS);
             WritingPipeline effectivePipeline = resolvePipeline(novel);
             boolean hotMeme = novel.isHotMemeEnabled();
-            String outline = generationAgent.generateOutline(topic, setting, effectivePipeline, hotMeme);
-            String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline, hotMeme);
+            WritingStyleHints styleHints = resolveStyleHints(novel);
+            OutlineGenerationResult outlineResult = generationAgent.generateOutlineResult(topic, setting, effectivePipeline, hotMeme, styleHints,
+                    novel.getOutlineDetailedPrefixChapters(), novel.getOutlineMinRoadmapChapters(), null);
+            String outline = outlineResult.markdown();
+            updateNovelOutline(novelId, outline, outlineResult.outlineGraphJson());
+            String profile = generationAgent.generateCharacterProfile(topic, setting, effectivePipeline, hotMeme, styleHints,
+                    outline, outlineResult.outlineGraphJson());
             generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
-            updateNovelDescription(novelId, outline);
-            int savedProfiles = persistCharacterProfilesStrict(novelId, topic, setting, effectivePipeline, profile, hotMeme);
+            int savedProfiles = persistCharacterProfilesStrict(novelId, topic, setting, effectivePipeline, profile, hotMeme, styleHints,
+                    outline, outlineResult.outlineGraphJson());
             generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
                     savedProfiles > 0 ? "success" : "failed",
                     savedProfiles > 0 ? null : "strict json parse failed");
@@ -146,16 +198,24 @@ public class NovelAgentService {
         // Outline
         boolean outlineReady = novel.getDescription() != null && !novel.getDescription().isBlank()
                 && !"AI generated novel".equals(novel.getDescription()) && !"AI生成的爽文小说".equals(novel.getDescription());
+        WritingStyleHints styleHints = resolveStyleHints(novel);
+        String outlineMdForChars = novel.getDescription();
+        String outlineGjForChars = novel.getOutlineGraphJson();
         if (!outlineReady) {
-            String outline = generationAgent.generateOutline(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled());
-            generationLogService.saveGenerationLog(novelId, null, "outline", len(outline), 0, "success", null);
-            updateNovelDescription(novelId, outline);
+            OutlineGenerationResult outlineResult = generationAgent.generateOutlineResult(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled(), styleHints,
+                    novel.getOutlineDetailedPrefixChapters(), novel.getOutlineMinRoadmapChapters(), null);
+            outlineMdForChars = outlineResult.markdown();
+            outlineGjForChars = outlineResult.outlineGraphJson();
+            generationLogService.saveGenerationLog(novelId, null, "outline", len(outlineMdForChars), 0, "success", null);
+            updateNovelOutline(novelId, outlineMdForChars, outlineGjForChars);
         }
 
         // Profiles
         if (!characterProfileService.hasUsableProfiles(novelId)) {
-            String profile = generationAgent.generateCharacterProfile(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled());
-            int savedProfiles = persistCharacterProfilesStrict(novelId, novel.getTopic(), setting, pipeline, profile, novel.isHotMemeEnabled());
+            String profile = generationAgent.generateCharacterProfile(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled(), styleHints,
+                    outlineMdForChars, outlineGjForChars);
+            int savedProfiles = persistCharacterProfilesStrict(novelId, novel.getTopic(), setting, pipeline, profile, novel.isHotMemeEnabled(), styleHints,
+                    outlineMdForChars, outlineGjForChars);
             generationLogService.saveGenerationLog(novelId, null, "character_profile", len(profile), 0,
                     savedProfiles > 0 ? "success" : "failed",
                     savedProfiles > 0 ? null : "strict json parse failed");
@@ -170,6 +230,44 @@ public class NovelAgentService {
             Chapter chapter = gen(novel, i, setting, null);
             userStatisticsService.updateGroupStatistics(novel.getGroupId(), 1, len(chapter.getContent()), false);
             safeSend(novel.getGroupId(), novelMessageFormatter.formatNovelMessage(novel, chapter));
+        }
+    }
+
+    /**
+     * 重新生成全书大纲（覆盖 {@link Novel#getDescription()}）。可选更新本书的大纲规划章参；已写正文不会自动改写，可能与新旧大纲不一致。
+     * 与章节类生成互斥：先本进程大纲区间锁，再 DB 租约；AI 调用不在长事务中。
+     */
+    public void regenerateOutline(Long novelId, String userHint, Integer outlineDetailedPrefixChapters, Integer outlineMinRoadmapChapters) {
+        boolean outlineLock = false;
+        Long leaseTaskId = null;
+        try {
+            if (!regenerationTaskGuardService.tryAcquireOutlineRegenerationLock(novelId)) {
+                throw new IllegalStateException("本书章节写入进行中，请稍后再修改大纲");
+            }
+            outlineLock = true;
+            leaseTaskId = generationTaskService.attachOutlineRegenerationLease(novelId);
+            Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new IllegalArgumentException("novel not found: " + novelId));
+            if (outlineDetailedPrefixChapters != null) {
+                novel.setOutlineDetailedPrefixChapters(outlineDetailedPrefixChapters);
+            }
+            if (outlineMinRoadmapChapters != null) {
+                novel.setOutlineMinRoadmapChapters(outlineMinRoadmapChapters);
+            }
+            novelRepository.save(novel);
+            WritingPipeline pipeline = resolvePipeline(novel);
+            WritingStyleHints styleHints = resolveStyleHints(novel);
+            String setting = novel.getGenerationSetting();
+            OutlineGenerationResult outlineResult = generationAgent.generateOutlineResult(novel.getTopic(), setting, pipeline, novel.isHotMemeEnabled(), styleHints,
+                    novel.getOutlineDetailedPrefixChapters(), novel.getOutlineMinRoadmapChapters(),
+                    userHint);
+            updateNovelOutline(novelId, outlineResult.markdown(), outlineResult.outlineGraphJson());
+            String logNote = userHint == null || userHint.isBlank() ? "outline_regenerate" : "outline_regenerate_with_hint";
+            generationLogService.saveGenerationLog(novelId, null, "outline", len(outlineResult.markdown()), 0, "success", logNote);
+        } finally {
+            generationTaskService.releaseOutlineRegenerationLease(leaseTaskId);
+            if (outlineLock) {
+                regenerationTaskGuardService.releaseOutlineRegenerationLock(novelId);
+            }
         }
     }
 
@@ -189,6 +287,12 @@ public class NovelAgentService {
             if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
             persistedNovelPk = novel.getId();
+            try {
+                generationTaskService.assertNoOutlineRegenerationLease(novel.getId());
+            } catch (IllegalStateException e) {
+                safeSend(groupId, e.getMessage());
+                return;
+            }
             List<Chapter> chapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
             targetChapterNum = requestedChapter == null ? chapters.size() + 1 : requestedChapter;
             Optional<Chapter> old = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), targetChapterNum);
@@ -236,6 +340,12 @@ public class NovelAgentService {
             if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
             nid = novel.getId();
+            try {
+                generationTaskService.assertNoOutlineRegenerationLease(novel.getId());
+            } catch (IllegalStateException e) {
+                safeSend(groupId, e.getMessage());
+                return;
+            }
             int current = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId()).size();
             int target = targetChapterCount == null ? defaultAutoContinueTarget : targetChapterCount;
             if (target <= current) {
@@ -292,6 +402,12 @@ public class NovelAgentService {
             Optional<Novel> opt = resolve(groupId, novelId);
             if (opt.isEmpty()) { safeSend(groupId, "Novel not found"); return; }
             Novel novel = opt.get();
+            try {
+                generationTaskService.assertNoOutlineRegenerationLease(novel.getId());
+            } catch (IllegalStateException e) {
+                safeSend(groupId, e.getMessage());
+                return;
+            }
             if (!regenerationTaskGuardService.tryAcquireRange(novel.getId(), from, to)) {
                 safeSend(groupId, "该区间章节正在重生中，请稍后再试。当前任务区间: " + regenerationTaskGuardService.getRunningRanges(novel.getId()));
                 return;
@@ -348,7 +464,8 @@ public class NovelAgentService {
             for (int attempt = 1; attempt <= 2; attempt++) {
                 try {
                     String repairSetting = buildCharacterRepairSetting(novel, effectiveOptions);
-                    String profileText = generationAgent.generateCharacterProfile(novel.getTopic(), repairSetting, pipeline, false);
+                    String profileText = generationAgent.generateCharacterProfile(novel.getTopic(), repairSetting, pipeline, false, resolveStyleHints(novel),
+                            null, novel.getOutlineGraphJson());
                     boolean replaceAll = effectiveOptions.rebuildMode == RebuildMode.ALL;
                     int savedProfiles = characterProfileService.saveCharacterProfilesJsonWithMode(
                             novel.getId(),
@@ -422,7 +539,12 @@ public class NovelAgentService {
     private Chapter genInner(Novel novel, int num, String novelSetting, String chapterSetting) {
         String profile = characterProfileService.getStableCharacterProfileBlock(novel.getId());
         List<Chapter> allChapters = chapterRepository.findByNovelIdOrderByChapterNumberAsc(novel.getId());
-        String previousContent = num <= 1 ? "" : chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num - 1).map(Chapter::getContent).orElse("");
+        WritingPipeline pipeline = resolvePipeline(novel);
+        String previousContentFull = num <= 1 ? "" : chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num - 1).map(Chapter::getContent).orElse("");
+        String previousContentForDraft = previousContentFull;
+        if (pipeline == WritingPipeline.LIGHT_NOVEL && num > 1 && previousContentFull != null && !previousContentFull.isBlank()) {
+            previousContentForDraft = chapterFactService.buildLightNovelPreviousChapterBridge(novel.getId(), num - 1, previousContentFull);
+        }
         String nextContent = chapterRepository.findByNovelIdAndChapterNumber(novel.getId(), num + 1).map(Chapter::getContent).orElse("");
         List<CharacterProfile> characterProfiles = characterProfileService.getProfiles(novel.getId());
         List<EntityConsistencyService.LockRule> lockRules = entityConsistencyService.buildStrongLockRules(characterProfiles);
@@ -431,22 +553,50 @@ public class NovelAgentService {
         String longTermMemory = storyMemoryService.buildStoryMemory(allChapters, lockedNames);
         String factMemory = chapterFactService.buildFactMemory(novel.getId(), 15);
         String snapshotMemory = plotSnapshotService.getLatestSnapshotBlock(novel.getId());
-        WritingPipeline pipeline = resolvePipeline(novel);
+        String narrativeStateForPrompt = buildNarrativeStatePromptBlock(novel.getId());
+        WritingStyleHints styleHints = resolveStyleHints(novel);
+        NarrativeProfile narrativeProfile = narrativeEngineEnabled
+                ? narrativeProfileResolver.resolve(pipeline, novel.getWritingStyleParams())
+                : null;
+        NarrativePhysicsMode narrativePhysicsMode = narrativeEngineEnabled
+                ? narrativeProfileResolver.resolvePhysicsMode(pipeline, novel.getWritingStyleParams())
+                : null;
+        if (narrativeProfile != null) {
+            log.debug("【叙事引擎】novelId={} chapter={} {} physics={}", novel.getId(), num, narrativeProfile.toLogSummary(),
+                    narrativePhysicsMode != null ? narrativePhysicsMode.name() : "—");
+        }
+        String carryoverForPrompt = null;
+        if (narrativeM4CarryoverEnabled) {
+            carryoverForPrompt = novelRepository.findById(novel.getId())
+                    .map(Novel::getNarrativeCarryover)
+                    .filter(s -> s != null && !s.isBlank())
+                    .map(String::trim)
+                    .orElse(null);
+        }
+        NarrativeEngineArtifactSink artifactSink = (narrativeEngineEnabled && narrativeM7ArtifactEnabled)
+                ? new NarrativeEngineArtifactSink()
+                : null;
         String content = generationAgent.generateChapter(
                 novel.getDescription(),
                 num,
-                previousContent,
+                previousContentForDraft,
                 nextContent,
                 profile,
-                summary(allChapters) + "\n\n" + longTermMemory + "\n\n" + factMemory + "\n\n" + snapshotMemory,
+                summary(allChapters) + "\n\n" + longTermMemory + "\n\n" + factMemory + "\n\n" + snapshotMemory
+                        + narrativeStateForPrompt,
                 novelSetting,
                 chapterSetting,
                 immutableConstraints,
                 pipeline,
-                novel.isHotMemeEnabled()
+                novel.isHotMemeEnabled(),
+                styleHints,
+                narrativeProfile,
+                narrativePhysicsMode,
+                carryoverForPrompt,
+                artifactSink
         );
         if (content == null || content.trim().isEmpty()) throw new RuntimeException("AI生成失败：返回内容为空");
-        String issueHint = entityConsistencyService.detectNameConsistencyIssue(previousContent, content, lockRules);
+        String issueHint = entityConsistencyService.detectNameConsistencyIssue(previousContentFull, content, lockRules);
         String snapshotIssueHint = plotSnapshotService.detectSnapshotDrift(novel.getId(), content, lockedNames);
         if (snapshotIssueHint != null) {
             consistencyAlertService.saveAlert(novel.getId(), num, "snapshot_drift", "medium", snapshotIssueHint, false, false);
@@ -460,7 +610,7 @@ public class NovelAgentService {
             String revised = generationAgent.reviseChapterForConsistency(content, immutableConstraints, combinedIssueHint);
             if (revised != null && !revised.trim().isEmpty()) {
                 content = revised;
-                String secondIssue = entityConsistencyService.detectNameConsistencyIssue(previousContent, content, lockRules);
+                String secondIssue = entityConsistencyService.detectNameConsistencyIssue(previousContentFull, content, lockRules);
                 String secondSnapshotIssue = plotSnapshotService.detectSnapshotDrift(novel.getId(), content, lockedNames);
                 boolean fixSuccess = secondIssue == null && secondSnapshotIssue == null;
                 consistencyAlertService.saveAlert(novel.getId(), num, "name_consistency_fix", fixSuccess ? "info" : "high",
@@ -484,8 +634,35 @@ public class NovelAgentService {
         // 自动补全“近期多次出现”的新角色设定（扩展层）
         newCharacterIngestService.maybeIngest(novel.getId(), num, lockedNames);
         plotSnapshotService.refreshSnapshotIfNeeded(novel.getId(), num, lockedNames);
-        generationLogService.saveGenerationLog(novel.getId(), num, "chapter", len(draft.content), 0, "success", null);
-        return saveChapter(novel.getId(), num, draft.title, draft.content, chapterSetting);
+        String narrativeLog = narrativeProfile != null ? narrativeProfile.toLogSummary() : null;
+        generationLogService.saveGenerationLog(novel.getId(), num, "chapter", len(draft.content), 0, "success", null, narrativeLog);
+        String artifactJson = artifactSink != null ? artifactSink.toJsonString(objectMapper, num) : null;
+        Chapter saved = saveChapter(novel.getId(), num, draft.title, draft.content, chapterSetting, artifactJson);
+        if (narrativeM4CarryoverEnabled) {
+            String nextCarry = buildNarrativeCarryoverForNextChapter(sidecar, draft.content, num);
+            Long novelId = novel.getId();
+            novelRepository.findById(novelId).ifPresent(n -> {
+                n.setNarrativeCarryover(nextCarry);
+                novelRepository.save(n);
+            });
+        }
+        if (narrativeM9CrosscutEnabled) {
+            Long nid = novel.getId();
+            novelRepository.findById(nid).ifPresent(fresh -> {
+                String json = buildNarrativeStateJson(
+                        nid,
+                        num,
+                        sidecar == null ? null : sidecar.continuityAnchor,
+                        sidecar == null ? null : sidecar.entities,
+                        sidecar == null ? null : sidecar.facts,
+                        fresh.getNarrativeCarryover());
+                if (json != null) {
+                    fresh.setNarrativeStateJson(json);
+                    novelRepository.save(fresh);
+                }
+            });
+        }
+        return saved;
     }
 
     public void listNovels(Long groupId) {
@@ -514,21 +691,49 @@ public class NovelAgentService {
         novelRepository.save(n);
     }
 
+    /** 更新 Markdown 大纲与可选的冲突图谱 JSON（两阶段大纲）；图谱 null 时清空旧图谱字段。 */
+    @Transactional
+    public void updateNovelOutline(Long novelId, String description, String outlineGraphJson) {
+        Novel n = novelRepository.findById(novelId).orElseThrow(() -> new RuntimeException("novel not found: " + novelId));
+        n.setDescription(description);
+        n.setOutlineGraphJson(outlineGraphJson);
+        novelRepository.save(n);
+    }
+
     @Transactional
     public Novel createNovel(Long groupId, String topic) { return createNovel(groupId, topic, null); }
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting) {
-        return createNovel(groupId, topic, setting, WritingPipeline.POWER_FANTASY, false);
+        return createNovel(groupId, topic, setting, WritingPipeline.POWER_FANTASY, false, null);
     }
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline) {
-        return createNovel(groupId, topic, setting, pipeline, false);
+        return createNovel(groupId, topic, setting, pipeline, false, null);
     }
 
     @Transactional
     public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled) {
+        return createNovel(groupId, topic, setting, pipeline, hotMemeEnabled, null, null, null);
+    }
+
+    @Transactional
+    public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                             String writingStyleParamsJson) {
+        return createNovel(groupId, topic, setting, pipeline, hotMemeEnabled, writingStyleParamsJson, null, null);
+    }
+
+    @Transactional
+    public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                             String writingStyleParamsJson, String serializationPlatform, String creatorNote) {
+        return createNovel(groupId, topic, setting, pipeline, hotMemeEnabled, writingStyleParamsJson, serializationPlatform, creatorNote, null, null);
+    }
+
+    @Transactional
+    public Novel createNovel(Long groupId, String topic, String setting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                             String writingStyleParamsJson, String serializationPlatform, String creatorNote,
+                             Integer outlineDetailedPrefixChapters, Integer outlineMinRoadmapChapters) {
         Novel n = new Novel();
         n.setTitle(title(topic));
         n.setTopic(topic);
@@ -537,7 +742,25 @@ public class NovelAgentService {
         n.setDescription("AI generated novel");
         n.setWritingPipeline((pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline).name());
         n.setHotMemeEnabled(hotMemeEnabled);
+        n.setWritingStyleParams(normalizeWritingStyleParamsJson(writingStyleParamsJson));
+        n.setSerializationPlatform(norm(serializationPlatform));
+        n.setCreatorNote(norm(creatorNote));
+        n.setOutlineDetailedPrefixChapters(outlineDetailedPrefixChapters);
+        n.setOutlineMinRoadmapChapters(outlineMinRoadmapChapters);
         return novelRepository.save(n);
+    }
+
+    /** 更新连载平台与创作说明（不参与 AI 提示词，仅展示与项目管理）。 */
+    @Transactional
+    public void updateBookMeta(Long novelId, String serializationPlatform, String creatorNote) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new IllegalArgumentException("未找到该小说"));
+        if (serializationPlatform != null) {
+            novel.setSerializationPlatform(norm(serializationPlatform));
+        }
+        if (creatorNote != null) {
+            novel.setCreatorNote(norm(creatorNote));
+        }
+        novelRepository.save(novel);
     }
 
     @Transactional
@@ -547,20 +770,108 @@ public class NovelAgentService {
         novelRepository.save(novel);
     }
 
+    /** 更新全书文风微参 JSON（仅影响后续生成；非空但无效时抛错）。传 null 或空串表示清空。 */
+    @Transactional
+    public void updateWritingStyleParams(Long novelId, String writingStyleParamsJson) {
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new IllegalArgumentException("novel not found: " + novelId));
+        String normalized = normalizeWritingStyleParamsJson(writingStyleParamsJson);
+        if (writingStyleParamsJson != null && !writingStyleParamsJson.isBlank() && normalized == null) {
+            throw new IllegalArgumentException("writingStyleParams 不是合法 JSON 或不包含支持的字段");
+        }
+        novel.setWritingStyleParams(normalized);
+        novelRepository.save(novel);
+    }
+
     @Transactional
     public Chapter saveChapter(Long novelId, int num, String title, String content) { return saveChapter(novelId, num, title, content, null); }
 
     @Transactional
     public Chapter saveChapter(Long novelId, int num, String title, String content, String setting) {
+        return saveChapter(novelId, num, title, content, setting, null);
+    }
+
+    @Transactional
+    public Chapter saveChapter(Long novelId, int num, String title, String content, String setting, String narrativeEngineArtifact) {
         Optional<Chapter> existing = chapterRepository.findByNovelIdAndChapterNumber(novelId, num);
         if (existing.isPresent()) {
             Chapter chapter = existing.get();
-            chapter.setTitle(title); chapter.setContent(content); chapter.setGenerationSetting(norm(setting));
+            chapter.setTitle(title);
+            chapter.setContent(content);
+            chapter.setGenerationSetting(norm(setting));
+            if (narrativeEngineArtifact != null) {
+                chapter.setNarrativeEngineArtifact(narrativeEngineArtifact);
+            }
             return chapterRepository.save(chapter);
         }
         Chapter c = new Chapter();
-        c.setNovelId(novelId); c.setChapterNumber(num); c.setTitle(title); c.setContent(content); c.setGenerationSetting(norm(setting));
+        c.setNovelId(novelId);
+        c.setChapterNumber(num);
+        c.setTitle(title);
+        c.setContent(content);
+        c.setGenerationSetting(norm(setting));
+        if (narrativeEngineArtifact != null) {
+            c.setNarrativeEngineArtifact(narrativeEngineArtifact);
+        }
         return chapterRepository.save(c);
+    }
+
+    /** M7：列出各章叙事引擎侧车 JSON（仅包含有数据的章）。 */
+    public List<Map<String, Object>> listNarrativeEngineArtifacts(Long novelId) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Chapter c : chapterRepository.findByNovelIdOrderByChapterNumberAsc(novelId)) {
+            if (c.getNarrativeEngineArtifact() == null || c.getNarrativeEngineArtifact().isBlank()) {
+                continue;
+            }
+            Map<String, Object> row = new HashMap<>();
+            row.put("chapterNumber", c.getChapterNumber());
+            row.put("chapterTitle", c.getTitle());
+            try {
+                row.put("artifact", objectMapper.readTree(c.getNarrativeEngineArtifact()));
+            } catch (Exception e) {
+                row.put("artifactRaw", c.getNarrativeEngineArtifact());
+            }
+            out.add(row);
+        }
+        return out;
+    }
+
+    /** M7：单章叙事侧车；无数据时 artifact 为 null。 */
+    public Map<String, Object> getNarrativeEngineArtifactForChapter(Long novelId, int chapterNumber) {
+        Chapter c = chapterRepository.findByNovelIdAndChapterNumber(novelId, chapterNumber)
+                .orElseThrow(() -> new NotFoundException("未找到该章节"));
+        Map<String, Object> m = new HashMap<>();
+        m.put("novelId", novelId);
+        m.put("chapterNumber", chapterNumber);
+        m.put("chapterTitle", c.getTitle());
+        if (c.getNarrativeEngineArtifact() == null || c.getNarrativeEngineArtifact().isBlank()) {
+            m.put("artifact", null);
+            m.put("message", "本章尚无叙事引擎侧车数据");
+            return m;
+        }
+        try {
+            m.put("artifact", objectMapper.readTree(c.getNarrativeEngineArtifact()));
+        } catch (Exception e) {
+            m.put("artifactRaw", c.getNarrativeEngineArtifact());
+        }
+        return m;
+    }
+
+    /** M9：全书跨章叙事状态快照（只读；数据来自 {@link Novel#getNarrativeStateJson}）。 */
+    public Map<String, Object> getNarrativeStateForNovel(Long novelId) {
+        Novel n = novelRepository.findById(novelId).orElseThrow(NotFoundException::novel);
+        Map<String, Object> m = new HashMap<>();
+        m.put("novelId", novelId);
+        if (n.getNarrativeStateJson() == null || n.getNarrativeStateJson().isBlank()) {
+            m.put("narrativeState", null);
+            m.put("message", "尚无跨章叙事状态快照（未开启 M9 或章节生成成功后才会写入）");
+            return m;
+        }
+        try {
+            m.put("narrativeState", objectMapper.readTree(n.getNarrativeStateJson()));
+        } catch (Exception e) {
+            m.put("narrativeStateRaw", n.getNarrativeStateJson());
+        }
+        return m;
     }
 
     public List<Novel> getAllNovels() {
@@ -593,16 +904,48 @@ public class NovelAgentService {
         }
     }
 
-    private int persistCharacterProfilesStrict(Long novelId, String topic, String setting, WritingPipeline pipeline, String firstResult, boolean hotMemeEnabled) {
+    private int persistCharacterProfilesStrict(Long novelId, String topic, String setting, WritingPipeline pipeline, String firstResult,
+                                             boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                             String outlineMarkdown, String outlineGraphJson) {
         int saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, firstResult);
-        if (saved > 0) return saved;
+        if (saved > 0) {
+            return saved;
+        }
+        Novel fresh = novelRepository.findById(novelId).orElse(null);
+        String md = outlineMarkdown != null && !outlineMarkdown.isBlank()
+                ? outlineMarkdown : (fresh != null ? fresh.getDescription() : null);
+        String gj = outlineGraphJson != null && !outlineGraphJson.isBlank()
+                ? outlineGraphJson : (fresh != null ? fresh.getOutlineGraphJson() : null);
         for (int attempt = 1; attempt <= 2; attempt++) {
             String retryPromptSetting = (setting == null ? "" : setting + "\n") + "【输出要求】必须返回严格JSON对象，字段仅包含 characters/name/type/want/fear/knowledge/summary。";
-            String retryResult = generationAgent.generateCharacterProfile(topic, retryPromptSetting, pipeline, hotMemeEnabled);
+            String retryResult = generationAgent.generateCharacterProfile(topic, retryPromptSetting, pipeline, hotMemeEnabled, styleHints, md, gj);
             saved = characterProfileService.saveCharacterProfilesJsonOnly(novelId, retryResult);
-            if (saved > 0) return saved;
+            if (saved > 0) {
+                return saved;
+            }
         }
         return 0;
+    }
+
+    private WritingStyleHints resolveStyleHints(Novel novel) {
+        if (novel == null) return null;
+        return WritingStyleHints.parseNullable(novel.getWritingStyleParams(), objectMapper);
+    }
+
+    /** 校验并压缩为可存库的 JSON；无效或空对象返回 null。 */
+    private String normalizeWritingStyleParamsJson(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        WritingStyleHints h = WritingStyleHints.parseNullable(raw, objectMapper);
+        if (h == null) {
+            log.warn("writingStyleParams 已忽略（解析失败或无可识别字段）");
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(h);
+        } catch (Exception e) {
+            log.warn("writingStyleParams 序列化失败", e);
+            return null;
+        }
     }
 
     private Optional<Novel> resolve(Long groupId, Integer novelId) { return novelId == null ? latest(groupId) : novelRepository.findById(novelId.longValue()); }
@@ -616,6 +959,35 @@ public class NovelAgentService {
         if (first == null || first.isBlank()) return (second == null || second.isBlank()) ? null : second;
         if (second == null || second.isBlank()) return first;
         return first + " " + second;
+    }
+
+    private static String tailExcerpt(String body, int maxChars) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        String t = body.stripTrailing();
+        if (t.length() <= maxChars) {
+            return t;
+        }
+        return t.substring(t.length() - maxChars).trim();
+    }
+
+    /** M4：写入书本字段，供下一章初稿承接（衔接锚点 + 尾声摘录）。 */
+    private String buildNarrativeCarryoverForNextChapter(ChapterSidecar sidecar, String chapterBody, int chapterNum) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("【上一章收束｜第").append(chapterNum).append("章】\n");
+        if (sidecar != null && sidecar.continuityAnchor != null && !sidecar.continuityAnchor.isBlank()) {
+            sb.append("衔接锚点：").append(sidecar.continuityAnchor.trim()).append("\n");
+        }
+        String tail = tailExcerpt(chapterBody, 320);
+        if (!tail.isBlank()) {
+            sb.append("尾声摘录（勿复述，仅作情绪/场面余波参考）：\n").append(tail);
+        }
+        String out = sb.toString().trim();
+        if (out.length() > 1800) {
+            return out.substring(0, 1800) + "…";
+        }
+        return out;
     }
 
     private ChapterSidecar extractChapterSidecarSafe(Novel novel, int chapterNumber, String content, WritingPipeline pipeline, List<String> lockedNames) {
@@ -669,6 +1041,135 @@ public class NovelAgentService {
         if (text == null || text.isBlank()) return null;
         String normalized = text.replace("\n", " ").trim();
         return normalized.length() <= maxLen ? normalized : normalized.substring(0, maxLen);
+    }
+
+    /** M9：上一章落库后的书本快照注入初稿上下文（仅聚合文本，勿照抄）。 */
+    private String buildNarrativeStatePromptBlock(Long novelId) {
+        if (!narrativeM9CrosscutEnabled) {
+            return "";
+        }
+        String raw = novelRepository.findById(novelId).map(Novel::getNarrativeStateJson).orElse(null);
+        if (raw == null || raw.isBlank()) {
+            return "";
+        }
+        String clip = clipM9(raw.strip(), 2800);
+        return "\n\n【M9 跨章叙事状态快照（衔接用，禁止复述原文）】\n" + clip;
+    }
+
+    /** M9：聚合 M4 承接、本章 sidecar、近期 sidecar 事实、最新阶段快照，写入 {@link Novel#setNarrativeStateJson}。 */
+    private String buildNarrativeStateJson(Long novelId, int chapterNumber,
+                                          String sidecarContinuityAnchor,
+                                          List<String> sidecarEntities,
+                                          List<String> sidecarFacts,
+                                          String carryoverText) {
+        try {
+            ObjectNode root = objectMapper.createObjectNode();
+            root.put("version", 1);
+            root.put("sourceChapter", chapterNumber);
+            root.put("updatedAt", java.time.Instant.now().toString());
+            String carry = carryoverText == null ? "" : carryoverText.strip();
+            root.put("m4CarryoverPreview", carry.length() > 500 ? carry.substring(0, 500) + "…" : carry);
+            if (sidecarContinuityAnchor != null && !sidecarContinuityAnchor.isBlank()) {
+                root.put("latestContinuityAnchor", clipM9(sidecarContinuityAnchor.strip(), 400));
+            } else {
+                root.putNull("latestContinuityAnchor");
+            }
+            ArrayNode ent = root.putArray("chapterEntities");
+            if (sidecarEntities != null) {
+                int c = 0;
+                for (String e : sidecarEntities) {
+                    if (e != null && !e.isBlank() && c++ < 20) {
+                        ent.add(e.strip());
+                    }
+                }
+            }
+            ArrayNode facts = root.putArray("chapterFactsPreview");
+            if (sidecarFacts != null) {
+                int c = 0;
+                for (String f : sidecarFacts) {
+                    if (f != null && !f.isBlank() && c++ < 8) {
+                        facts.add(clipM9(f.strip(), 160));
+                    }
+                }
+            }
+            ArrayNode recent = root.putArray("recentSidecarFacts");
+            List<ChapterFact> all = chapterFactService.getFactsByNovel(novelId);
+            int added = 0;
+            for (int i = all.size() - 1; i >= 0 && added < 10; i--) {
+                ChapterFact f = all.get(i);
+                if (!"sidecar_fact".equals(f.getFactType())) {
+                    continue;
+                }
+                if (f.getChapterNumber() == null || f.getChapterNumber() < chapterNumber - 3) {
+                    continue;
+                }
+                ObjectNode o = recent.addObject();
+                o.put("chapterNumber", f.getChapterNumber());
+                o.put("content", clipM9(f.getFactContent() == null ? "" : f.getFactContent(), 140));
+                added++;
+            }
+            ArrayNode relHints = root.putArray("relationshipHints");
+            int rh = 0;
+            for (int i = all.size() - 1; i >= 0 && rh < 8; i--) {
+                ChapterFact f = all.get(i);
+                if (!"character_state".equals(f.getFactType())) {
+                    continue;
+                }
+                if (f.getChapterNumber() == null || f.getChapterNumber() < chapterNumber - 5) {
+                    continue;
+                }
+                String sub = f.getSubjectName() == null ? "" : f.getSubjectName().strip();
+                String line = (sub.isEmpty() ? "角色" : sub) + ": " + clipM9(f.getFactContent() == null ? "" : f.getFactContent(), 120);
+                relHints.add(line);
+                rh++;
+            }
+            Optional<PlotSnapshot> snap = plotSnapshotService.findLatestSnapshot(novelId);
+            if (snap.isPresent()) {
+                PlotSnapshot s = snap.get();
+                ObjectNode ps = root.putObject("latestPlotSnapshot");
+                ps.put("snapshotChapter", s.getSnapshotChapter());
+                String body = s.getSnapshotContent() == null ? "" : s.getSnapshotContent().strip();
+                ps.put("contentPreview", clipM9(body, 800));
+            } else {
+                root.putNull("latestPlotSnapshot");
+            }
+            root.put("tensionRippleHint", buildM9TensionRippleHint(chapterNumber, snap));
+            root.put("schemaVersion", 2);
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            log.warn("M9 narrative_state_json 序列化失败 novelId={} ch={}", novelId, chapterNumber, e);
+            return null;
+        }
+    }
+
+    /** M9 深化：据「当前章 vs 最近阶段快照章」给一句余波/收束节奏提示（规则层，非模型）。 */
+    private static String buildM9TensionRippleHint(int chapterNumber, Optional<PlotSnapshot> snapOpt) {
+        if (snapOpt.isEmpty()) {
+            return "尚无阶段快照：衔接依赖章节事实与 M4 承接。";
+        }
+        Integer snapCh = snapOpt.get().getSnapshotChapter();
+        if (snapCh == null || snapCh <= 0) {
+            return "阶段快照章号缺失：延续近期事实与承接。";
+        }
+        int gap = chapterNumber - snapCh;
+        if (gap <= 0) {
+            return "当前章已落在最新阶段快照窗口内：强衔接上一窗口主线。";
+        }
+        if (gap <= 3) {
+            return "距上次阶段快照较近（" + gap + " 章）：伏笔与情绪余波可适当加重，避免跳档。";
+        }
+        if (gap <= 10) {
+            return "距阶段快照约 " + gap + " 章：平衡旧线回收与新信息推进，防止主线漂移。";
+        }
+        return "距上次阶段快照已 " + gap + " 章：建议检视是否需收束旧伏笔或补锚点，再开新击。";
+    }
+
+    private static String clipM9(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        String t = s.strip();
+        return t.length() <= max ? t : t.substring(0, max) + "…";
     }
 
     private ChapterDraft normalizeChapterDraft(String rawContent, int chapterNumber) {

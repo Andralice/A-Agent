@@ -10,6 +10,8 @@ import java.util.List;
 /** {@link com.start.agent.model.Novel} 持久化。 */
 @Repository
 public interface NovelRepository extends JpaRepository<Novel, Long> {
+    List<Novel> findByLibraryPublicTrueOrderByCreateTimeDesc();
+
     List<Novel> findByGroupId(Long groupId);
     List<Novel> findByUserIdAndGroupId(Long userId, Long groupId);
     

@@ -54,6 +54,65 @@ novel:
   auto-continue:
     default-target: 20
     max-target: 200
+  # 大纲生成：防止模型把全书主线压缩成十几～二十章；可调高以更强约束长篇分期
+  outline:
+    detailed-prefix-chapters: 40
+    min-roadmap-chapters: 120
+    # 两阶段大纲（效果最好）：先专用调用产出冲突图谱 JSON，再生成 Markdown 大纲并锚定该 JSON；失败则自动退回单阶段
+    two-phase-graph-enabled: true
+    graph-phase-temperature: 0.35
+    # cast 角色表加入图谱后输出更长，略抬高上限减少截断
+    graph-phase-max-tokens: 3600
+    # 角色生成时从 Markdown 大纲摘取的最大字符（世界观/主角/主要/对立/冲突概要）
+    character-excerpt-max-chars: 14000
+  light-novel:
+    # 轻小说：章前多一次模型调用生成节拍规划，再写正文（抑复述、锁主线）；false 则跳过以省耗时/费用
+    chapter-planning-enabled: true
+  narrative-engine:
+    # 叙事引擎 1.0：按管线默认 NarrativeProfile + writingStyleParams.narrative 合并，注入初稿/润色/终稿提示词
+    enabled: true
+    # M2：章前 Planner 多一次模型调用，输出「叙事脚本」再写初稿；失败或解析失败时静默回退为仅 M1
+    two-phase-enabled: true
+    # 轻小说已开「章拍规划」时默认不再跑叙事 Planner，避免两套节拍；设 false 可双开（更贵）
+    two-phase-skip-with-light-novel-plan: true
+    planner-temperature: 0.35
+    planner-max-tokens: 1200
+    # 叙事阻力层：Planner JSON 增加障碍字段；未返回时初稿仍注入默认「非最优路径」约束（省时可关）
+    resistance-layer-enabled: true
+    # 流体润滑 Pass：终稿去 AI 味之后、Lint 之前；只加过渡与感知缓冲，不改剧情（省时可关）
+    flow-pass-enabled: true
+    flow-pass-temperature: 0.35
+    flow-pass-max-tokens: 4096
+    # M3：终稿后扫描禁止短语/标签句；命中时可选窄幅修订（多一次模型调用）
+    lint-enabled: true
+    lint-fix-enabled: true
+    lint-fix-temperature: 0.35
+    lint-fix-max-tokens: 4096
+    # M4：章节成功落库后更新书本级承接摘要，下一章初稿注入（关闭则不更新、不注入）
+    m4-carryover-enabled: true
+    # M7：章节生成时收集 Planner/Lint 结构化快照写入 chapter.narrative_engine_artifact，并暴露只读 API（需 narrative-engine.enabled）
+    m7-artifact-enabled: true
+    # M9：章节成功落库后聚合跨章叙事状态 JSON 写入 novel.narrative_state_json（含 relationshipHints、tensionRippleHint、schemaVersion）；GET .../narrative-state；下一章初稿附带快照摘录
+    m9-crosscut-enabled: true
+    # M8：Lint 之后可选「批评」JSON pass + 按严重度触发一轮窄幅重写（多 1～2 次模型调用）
+    m8-critic-enabled: true
+    m8-rewrite-enabled: true
+    m8-critic-temperature: 0.25
+    m8-critic-max-tokens: 1500
+    m8-rewrite-temperature: 0.35
+    m8-rewrite-max-tokens: 4096
+    # 触发重写所需最低 issue 严重度：low | medium | high（或 低/中/高）
+    m8-rewrite-min-severity: medium
+
+# HTTP 书库：管理员 JWT + 小说「公共/仅管理员」开关；关闭 enabled 则行为与旧版一致（全部可见、无登录）
+# 以下为默认内置账号（明文仅便于本地/内网；公网部署请务必改成强密码并勿提交仓库）
+app:
+  security:
+    enabled: true
+    admin-username: admin
+    admin-password: "NovelAgent#Admin2026"
+    jwt-secret: "novel-agent-jwt-hs256-key-min-32-chars-local-default!!"
+    jwt-expiration-ms: 86400000
 
 logging:
   level:

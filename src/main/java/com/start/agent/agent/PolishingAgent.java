@@ -2,9 +2,14 @@
 package com.start.agent.agent;
 
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.narrative.NarrativeCriticReport;
+import com.start.agent.narrative.NarrativeLintIssue;
+import com.start.agent.narrative.NarrativeLintReport;
+import com.start.agent.narrative.NarrativeProfile;
 import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Component;
 
 /**
@@ -18,22 +23,33 @@ public class PolishingAgent {
 
     public PolishingAgent(ChatClient.Builder chatClientBuilder) {
         this.chatClient = chatClientBuilder.build();
-        log.info("【AI代理初始化】PolishingAgent 已就绪 (去AI味破坏者模式)");
+        log.info("【AI代理初始化】PolishingAgent 已就绪（按 WritingPipeline 分支润色）");
     }
 
     public String polish(String content, String outline, int chapterNumber) {
         return polish(content, outline, chapterNumber, WritingPipeline.POWER_FANTASY);
     }
 
-    /** 爽文（POWER_FANTASY）走节奏保真润色；其它流水线保留破坏式去 AI 味。 */
+    /** 按 {@link WritingPipeline} 选用专用润色策略（爽文节奏保真 / 轻小说与日常轻度去皱 / 年代克制 / 粗俗短句）。 */
     public String polish(String content, String outline, int chapterNumber, WritingPipeline pipeline) {
         WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
-        boolean shuangwen = p == WritingPipeline.POWER_FANTASY;
-        log.info("【✨ 润色优化】第{}章 — {}", chapterNumber, shuangwen ? "爽文节奏润色" : "去AI味深度改造");
+        String modeLabel = switch (p) {
+            case POWER_FANTASY -> "爽文节奏润色";
+            case LIGHT_NOVEL -> "轻小说润色";
+            case SLICE_OF_LIFE -> "日常向润色";
+            case PERIOD_DRAMA -> "年代文润色";
+            case VULGAR -> "粗俗风润色";
+        };
+        log.info("【✨ 润色优化】第{}章 — {}", chapterNumber, modeLabel);
         long startTime = System.currentTimeMillis();
 
-        String prompt = shuangwen ? buildShuangwenPolishPrompt(outline, chapterNumber, content)
-                : buildDestructivePolishPrompt(outline, chapterNumber, content);
+        String prompt = switch (p) {
+            case POWER_FANTASY -> buildShuangwenPolishPrompt(outline, chapterNumber, content);
+            case LIGHT_NOVEL -> buildLightNovelPolishPrompt(outline, chapterNumber, content);
+            case SLICE_OF_LIFE -> buildSlicePolishPrompt(outline, chapterNumber, content);
+            case PERIOD_DRAMA -> buildPeriodPolishPrompt(outline, chapterNumber, content);
+            case VULGAR -> buildVulgarPolishPrompt(outline, chapterNumber, content);
+        };
 
         log.debug("【✨ 润色优化】提示词长度: {} 字符", prompt.length());
 
@@ -46,6 +62,124 @@ public class PolishingAgent {
             long elapsed = System.currentTimeMillis() - startTime;
             log.error("【✨ 润色优化】❌ 失败 - 耗时: {}ms", elapsed, e);
             throw e;
+        }
+    }
+
+    /**
+     * M3：叙事 Lint 命中后的窄幅修订——优先去掉禁止短语与标签句，不改剧情因果。
+     */
+    public String polishNarrativeLintPass(String content,
+                                          int chapterNumber,
+                                          WritingPipeline pipeline,
+                                          NarrativeProfile profile,
+                                          NarrativeLintReport report,
+                                          double temperature,
+                                          int maxTokens) {
+        if (content == null || content.isBlank() || report == null || !report.hasIssues()) {
+            return content;
+        }
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        log.info("【叙事Lint修订】第{}章 — 命中 {} 条，pipeline={}", chapterNumber, report.issues().size(), p.name());
+        long startTime = System.currentTimeMillis();
+
+        StringBuilder issueBlock = new StringBuilder();
+        for (NarrativeLintIssue i : report.issues()) {
+            issueBlock.append("- [").append(i.type()).append("] ").append(i.detail()).append("\n");
+        }
+
+        String forbidReminder = "";
+        if (profile != null && !profile.forbiddenLines().isEmpty()) {
+            forbidReminder = "以下短语仍严禁出现（除非在对白里作为他人嘲讽且有必要）："
+                    + String.join("、", profile.forbiddenLines()) + "\n\n";
+        }
+
+        double t = Math.max(0, Math.min(2, temperature));
+        int mt = Math.max(512, Math.min(8192, maxTokens));
+
+        String prompt = String.format("""
+                你是小说窄范围修订编辑。【只允许】消除下列叙事 Lint 问题：替换为空洞标签的情绪句、命中禁止短语、过度直白的「点名情绪」。
+                
+                【硬性要求】
+                1. **不改剧情**：人物生死、关键事实、道具归属、对立结构、章节结局走向一律不变。
+                2. **可改写范围**：用语与句式；把标签情绪改成动作、对白、停顿、生理细节或他人可见反应。
+                3. **禁止**：新增设定、新增核心角色、扩写无关桥段、写meta「本章完」。
+                4. **排版**：保留分段习惯；不要引入 markdown 标题或「---」分隔线。
+                5. **第三人称**与本书一致。
+                
+                【叙事引擎管线】%s
+                
+                【Lint 命中（须逐项处理；处理后正文不应再含有禁止短语的字面连续出现）】
+                %s
+                
+                %s【待修订正文｜第%d章】
+                %s
+                
+                请只输出修订后的完整正文，不要解释。
+                """, p.name(), issueBlock.toString().trim(), forbidReminder, chapterNumber, content);
+
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(t)
+                .maxTokens(mt)
+                .build();
+        try {
+            String result = chatClient.prompt(prompt).options(opts).call().content();
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (result == null || result.isBlank()) {
+                log.warn("【叙事Lint修订】✅ 返回空，保留原文 - 耗时: {}ms", elapsed);
+                return content;
+            }
+            log.info("【叙事Lint修订】✅ 完成 - 耗时: {}ms, 长度 {} -> {}", elapsed, content.length(), result.length());
+            return result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("【叙事Lint修订】❌ 失败 - 耗时: {}ms，保留原文", elapsed, e);
+            return content;
+        }
+    }
+
+    /**
+     * 流体润滑：终稿去 AI 味之后、Lint 之前；只加强过渡与体感连续，不改剧情因果。
+     */
+    public String polishNarrativeFlowPass(String content,
+                                          int chapterNumber,
+                                          WritingPipeline pipeline,
+                                          double temperature,
+                                          int maxTokens) {
+        if (content == null || content.isBlank()) {
+            return content;
+        }
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        log.info("【叙事流体润滑】第{}章 — pipeline={}", chapterNumber, p.name());
+        long startTime = System.currentTimeMillis();
+        double t = Math.max(0, Math.min(2, temperature));
+        int mt = Math.max(512, Math.min(8192, maxTokens));
+
+        String prompt = NarrativeCraftPrompts.narrativeFlowSmootherRole(p) + String.format("""
+
+
+                【待润滑正文｜第%d章】
+                %s
+
+                请只输出润滑后的完整正文，不要解释。
+                """, chapterNumber, content);
+
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(t)
+                .maxTokens(mt)
+                .build();
+        try {
+            String result = chatClient.prompt(prompt).options(opts).call().content();
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (result == null || result.isBlank()) {
+                log.warn("【叙事流体润滑】返回空，保留原文 - 耗时: {}ms", elapsed);
+                return content;
+            }
+            log.info("【叙事流体润滑】✅ 完成 - 耗时: {}ms, 长度 {} -> {}", elapsed, content.length(), result.length());
+            return result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("【叙事流体润滑】❌ 失败 - 耗时: {}ms，保留原文", elapsed, e);
+            return content;
         }
     }
 
@@ -81,70 +215,246 @@ public class PolishingAgent {
             """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendumShuangwen());
     }
 
-    private static String buildDestructivePolishPrompt(String outline, int chapterNumber, String content) {
+    private static String buildLightNovelPolishPrompt(String outline, int chapterNumber, String content) {
         return String.format("""
-            你是一位极具个性的资深网文主编，你的核心任务是做一次**“破坏式重写”**。
-            你要把 AI 生成的平庸、工整、正确的文字，改造成有血有肉、有偏差、有噪音的人类作品。
+            你是资深轻小说责编，擅长保留「对白节奏 + 角色魅力」，同时去掉 AI 腔与赘述。
             
             【故事大纲背景】
             %s
             
             【当前章节】第%d章
             
-            【待改造内容】
+            【待润色正文】
             %s
             
-            【核心改造指令 - 必须严格执行】
-            
-            1️⃣ **打破“情绪恒温” (强制情绪断裂)**
-               - ❌ 禁止：他很难过，但坚持完成了任务。
-               - ✅ 必须：前半段极端情绪（崩溃/愤怒/荒诞），后半段突然冷静甚至冷漠。
-               - 例子：他在厕所吐到眼泪混着胃酸，十分钟后，他洗了脸，像什么都没发生一样去签字。
-               - **行动**：找出文中情绪平稳的地方，制造“断裂感”。
-            
-            2️⃣ **句式“长短失控” (节奏跛脚)**
-               - ❌ 禁止：平均长度的句子，结构对称，逻辑完整。
-               - ✅ 必须：一段里塞一个超长句（甚至带点混乱），下一句突然极短。
-               - 例子：他解释了很多，从动机到过程，从误会到命运，像是在替自己辩护。没人听。包括他自己。
-               - **行动**：打碎工整的句式，制造节奏的“跛脚感”。
-            
-            3️⃣ **插入“无用但真实”的细节 (真实感爆炸)**
-               - ❌ 禁止：房间很凌乱，桌上堆满文件。（服务剧情的细节）
-               - ✅ 必须：桌上有一杯三天前的咖啡，表面已经长出一层薄薄的灰。（对剧情没用但极真实）
-               - **行动**：在场景描写中，强行插入 1-2 个与主线无关但极具生活质感的细节。
-            
-            4️⃣ **允许人物“不合理” (自我背叛)**
-               - ❌ 禁止：人物太讲道理，太一致，太“正确”。
-               - ✅ 必须：让人物突然说反话，做自己都解释不了的决定，前后矛盾。
-               - 例子：他明知道那是错的，手指却还是按下去。像是跟自己较劲，又像是懒得再争辩。
-               - **行动**：在人物决策时，加入一点“非理性”或“自我背叛”的心理描写。
-            
-            5️⃣ **风格突变 (突然换频道)**
-               - ❌ 禁止：整篇风格统一。
-               - ✅ 必须：正常叙述 -> 突然像聊天；正经描写 -> 突然黑色幽默；文艺 -> 突然粗糙。
-               - 例子：他的人生像一条精心规划的轨道。然后他脱轨了。很响。很难看。
-               - **行动**：在段落转换时，尝试一次风格的剧烈跳跃。
-            
-            6️⃣ **删掉“总结句” (悬空结尾)**
-               - ❌ 禁止：这让他明白了人生的意义……（AI 最爱的总结）
-               - ✅ 必须：直接删掉总结，换成“悬空句”。
-               - 例子：他点了点头。至于为什么，他没有再想。
-               - **行动**：检查每段结尾，删掉所有升华意义的句子，留给读者补完。
-
-            7️⃣ **压制“对立定义句式” (减少 AI 腔转折)**
-               - ❌ 禁止：为显得有力度而反复使用「不是X，是Y」「并非X，而是Y」「与其说X，不如说Y」。
-               - ✅ 必须：能直说就直说；转折靠事件与后果；需要强调时用动作、细节、语气断裂来承载，不靠模板句式。
+            【轻小说润色 — 必须遵守】
+            1. **保剧情**：不改事实与结局；误会、约定、比赛、关系的进展链条要完整。
+            2. **对白优先**：能用两句对白推进的，不写一段旁白解释；内心独白留一两句点睛即可。
+            3. **去杠杆**：删说明书式设定堆砌、模板升华；少用对立定义句式。
+            4. **排版**：去掉「---」「# 标题」「（本章完）」；分段用空行。
+            5. **基调**：轻快但有内容，不把一章磨成白开水；禁止突然变成血腥虐杀纪录片腔（除非本章本就如此）。
+            6. **第三人称**。
             
             %s
             
             【执行策略】
-            - 不要改变核心剧情和爽点结构。
-            - **删掉 20%% 的废话句子**。
-            - **改掉 30%% 的工整句式**。
-            - **加入 10%% 的“无用细节”**。
-            - 保持第三人称叙述。
+            - 删废话约 12%%；适度收紧描写；保留俏皮与停顿感。
             
-            请返回改造后的完整内容，让它看起来**不像 AI 写的**：
-            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendum());
+            请返回润色后的完整正文：
+            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendumLightNovel());
+    }
+
+    private static String buildSlicePolishPrompt(String outline, int chapterNumber, String content) {
+        return String.format("""
+            你是资深日常向小说编辑，擅长让生活流读起来舒服、可信，去掉说教与 AI 补丁腔。
+            
+            【故事大纲背景】
+            %s
+            
+            【当前章节】第%d章
+            
+            【待润色正文】
+            %s
+            
+            【日常向润色 — 必须遵守】
+            1. **保剧情**：不改人物关系与事件结果；小事也要有因果。
+            2. **生活质感**：保留或补强一两处具体细节（路况、吃食、短信、小钱），删空洞形容词。
+            3. **情绪**：少用标签句「她很失落」；改用动作、沉默、话到嘴边又咽下。
+            4. **去杠杆**：删鸡汤总结、机械排比；转折靠事件，不靠旁白讲道理。
+            5. **勿玄幻化**：非异能题材不要润色成开挂打脸口吻。
+            6. **排版**：去掉 markdown 分隔线与标题行。
+            7. **第三人称**。
+            
+            %s
+            
+            【执行策略】
+            - 删空话约 12%%；节奏舒缓但有波纹。
+            
+            请返回润色后的完整正文：
+            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendumSliceOfLife());
+    }
+
+    private static String buildPeriodPolishPrompt(String outline, int chapterNumber, String content) {
+        return String.format("""
+            你是资深年代文主编，擅长克制、烟火气与时代可信感；禁止把文字改成段子或网游腔。
+            
+            【故事大纲背景】
+            %s
+            
+            【当前章节】第%d章
+            
+            【待润色正文】
+            %s
+            
+            【年代文润色 — 必须遵守】
+            1. **保剧情**：不改走向与人物立场；压迫与翻盘要有生活逻辑。
+            2. **时代语感**：删掉网络流行语、二次元梗、违和的现代企业管理腔；用语贴合人物身份。
+            3. **情绪克制**：外溢靠细节与省略，不靠咆哮式排比；禁止为「生动」制造荒诞幽默断层。
+            4. **去杠杆**：删模板升华与对立定义堆砌。
+            5. **排版**：去掉「---」「# ...」「（本章完）」。
+            6. **第三人称**。
+            
+            %s
+            
+            【执行策略】
+            - 删赘述约 10%%；宁可朴素也要可信。
+            
+            请返回润色后的完整正文：
+            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendumPeriodDrama());
+    }
+
+    private static String buildVulgarPolishPrompt(String outline, int chapterNumber, String content) {
+        return String.format("""
+            你是资深市井题材编辑，擅长短句、狠对白与江湖气，同时守住合规底线（无色情细节、无仇恨煽动）。
+            
+            【故事大纲背景】
+            %s
+            
+            【当前章节】第%d章
+            
+            【待润色正文】
+            %s
+            
+            【粗俗风润色 — 必须遵守】
+            1. **保剧情**：不改冲突结果；嘴炮要与后果对齐。
+            2. **短句**：对线利落，删讲解员式旁白；多人对话要有抢话与打断。
+            3. **粗口**：可精炼使用语气攻击性，禁止堆砌脏字刷屏；绝不写出露骨性行为描写。
+            4. **去杠杆**：删对称排比与「人生导师」式总结。
+            5. **排版**：去掉 markdown 痕迹。
+            6. **第三人称**。
+            
+            %s
+            
+            【执行策略】
+            - 删废话约 15%%；节奏偏快但有落脚点。
+            
+            请返回润色后的完整正文：
+            """, outline, chapterNumber, content, NarrativeCraftPrompts.polishingCraftAddendumVulgar());
+    }
+
+    private static final int M8_CONTENT_CLIP = 28_000;
+    private static final int M8_OUTLINE_CLIP = 2_500;
+
+    /**
+     * M8：叙事批评 pass，模型须只输出 JSON：{@code {"issues":[{"severity":"low|medium|high","detail":"..."}]}}。
+     */
+    public String callNarrativeCritic(String content,
+                                      String outline,
+                                      int chapterNumber,
+                                      WritingPipeline pipeline,
+                                      NarrativeProfile profile,
+                                      double temperature,
+                                      int maxTokens) {
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        String body = clipForPrompt(content, M8_CONTENT_CLIP);
+        String outlineClip = clipForPrompt(outline == null ? "" : outline, M8_OUTLINE_CLIP);
+        String profileHint = profile == null ? "（无叙事 profile）" : profile.toLogSummary();
+        double t = Math.max(0, Math.min(1.5, temperature));
+        int mt = Math.max(256, Math.min(4096, maxTokens));
+
+        String prompt = String.format("""
+                你是小说技术审读编辑。只做结构层面的「挑刺」，不替作者重写正文。
+                请**只输出一个 JSON 对象**，不要 markdown 代码围栏，不要前后解释文字。
+                严格符合此结构（键名必须一致）：
+                {"issues":[{"severity":"low|medium|high","detail":"不超过90字的中文"}]}
+                若无问题则输出 {"issues":[]}。
+                最多 12 条，按严重度从高到低排列；关注：节奏拖沓、信息重复交代、动机不清、转折过陡、对白说明书化、与大纲明显矛盾（若能从大纲判断）。
+                %s
+                
+                【叙事管线】%s
+                【叙事 profile 摘要】%s
+                
+                【大纲摘录】
+                %s
+                
+                【第%d章正文】
+                %s
+                """, NarrativeCraftPrompts.narrativeM8CriticTooSmoothInstructions(), p.name(), profileHint, outlineClip, chapterNumber, body);
+
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(t)
+                .maxTokens(mt)
+                .build();
+        String result = chatClient.prompt(prompt).options(opts).call().content();
+        return result == null ? "" : result.strip();
+    }
+
+    /**
+     * M8：根据批评 issue 列表做**一轮**窄幅重写（不改剧情因果与结局）。
+     */
+    public String polishNarrativeCriticPass(String content,
+                                           int chapterNumber,
+                                           WritingPipeline pipeline,
+                                           NarrativeProfile profile,
+                                           NarrativeCriticReport report,
+                                           double temperature,
+                                           int maxTokens) {
+        if (content == null || content.isBlank() || report == null || !report.hasIssues()) {
+            return content;
+        }
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        log.info("【叙事批评修订】第{}章 — 处理 {} 条意见, pipeline={}", chapterNumber, report.issues().size(), p.name());
+        long startTime = System.currentTimeMillis();
+
+        StringBuilder issueBlock = new StringBuilder();
+        for (var i : report.issues()) {
+            issueBlock.append("- [").append(i.severity()).append("] ").append(i.detail()).append("\n");
+        }
+
+        double t = Math.max(0, Math.min(2, temperature));
+        int mt = Math.max(512, Math.min(8192, maxTokens));
+
+        String prompt = String.format("""
+                你是小说窄幅修订编辑。根据下列**审读意见**优化行文，使读者读感更顺。
+                
+                【硬性要求】
+                1. **不改剧情**：人物生死、关键事实、道具归属、对立结构、章节结局走向一律不变。
+                2. **可改写范围**：节奏、详略、对白自然度、删掉重复交代；可把说明性对白改成动作或场面反应。
+                3. **禁止**：新增核心设定、新增重要角色、扩写无关大段、写 meta「本章完」。
+                4. **排版**：保留分段；不要 markdown 标题或「---」。
+                5. **第三人称**与原文一致。
+                
+                【叙事管线】%s
+                
+                【审读意见（须逐项照顾；不必逐条回应，体现在正文里即可）】
+                %s
+                
+                【待修订正文｜第%d章】
+                %s
+                
+                请只输出修订后的完整正文，不要解释。
+                %s
+                """, p.name(), issueBlock.toString().trim(), chapterNumber, content,
+                NarrativeCraftPrompts.narrativeM8FrictionRewriteFooter());
+
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(t)
+                .maxTokens(mt)
+                .build();
+        try {
+            String result = chatClient.prompt(prompt).options(opts).call().content();
+            long elapsed = System.currentTimeMillis() - startTime;
+            if (result == null || result.isBlank()) {
+                log.warn("【叙事批评修订】返回空，保留原文 - 耗时: {}ms", elapsed);
+                return content;
+            }
+            log.info("【叙事批评修订】✅ 完成 - 耗时: {}ms, 长度 {} -> {}", elapsed, content.length(), result.length());
+            return result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.error("【叙事批评修订】❌ 失败 - 耗时: {}ms，保留原文", elapsed, e);
+            return content;
+        }
+    }
+
+    private static String clipForPrompt(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        String t = s.strip();
+        if (t.length() <= max) {
+            return t;
+        }
+        return t.substring(0, max) + "…";
     }
 }

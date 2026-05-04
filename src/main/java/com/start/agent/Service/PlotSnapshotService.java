@@ -29,6 +29,11 @@ public class PlotSnapshotService {
         this.chapterFactRepository = chapterFactRepository;
     }
 
+    /** M9 / 调试：取本书最新一条阶段快照实体（若无则 empty）。 */
+    public Optional<PlotSnapshot> findLatestSnapshot(Long novelId) {
+        return plotSnapshotRepository.findTopByNovelIdOrderBySnapshotChapterDesc(novelId);
+    }
+
     public String getLatestSnapshotBlock(Long novelId) {
         Optional<PlotSnapshot> snapshot = plotSnapshotRepository.findTopByNovelIdOrderBySnapshotChapterDesc(novelId);
         if (snapshot.isEmpty()) return "【阶段主线快照】\n无";

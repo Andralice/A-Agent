@@ -40,6 +40,10 @@ public class GenerationLog {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    /** 成功或其它场景下的附加上下文（如叙事引擎 profile 摘要）；失败时可为 null。 */
+    @Column(name = "context_note", columnDefinition = "TEXT")
+    private String contextNote;
+
     @Column(name = "create_time")
     private LocalDateTime createTime;
 

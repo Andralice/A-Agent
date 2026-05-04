@@ -5,6 +5,9 @@
 #   .\note\deploy.ps1
 #
 # 修改部署目标：编辑 note/deploy.sh 顶部「配置区」。
+# systemd 发布：先在服务器安装 note/novel-agent.service.example + novel-agent.env，再设环境变量：
+#   $env:DEPLOY_MODE = "systemd"
+#   .\note\deploy.ps1
 
 param()
 

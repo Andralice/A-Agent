@@ -32,6 +32,12 @@ public class Chapter {
     @Column(name = "generation_setting", columnDefinition = "TEXT")
     private String generationSetting;
 
+    /**
+     * M7：叙事引擎中间产物 JSON（Planner 摘要 / Lint 命中与修正标记）；只读 API 暴露给前端调试。
+     */
+    @Column(name = "narrative_engine_artifact", columnDefinition = "TEXT")
+    private String narrativeEngineArtifact;
+
     /** {@link ChapterWriteState}（库表默认 READY，兼容旧数据行）。 */
     @Column(name = "write_state", nullable = false, length = 48, columnDefinition = "varchar(48) NOT NULL DEFAULT 'READY'")
     private String writeState = ChapterWriteState.READY.name();

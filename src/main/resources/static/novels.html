@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>小说列表 · 导演台联调</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7eef8;
+      --muted: #8b9cb3;
+      --accent: #6cb3ff;
+      --danger: #ff6b6b;
+      --border: #2a3a52;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 0.35rem 0 0; font-size: 0.85rem; color: var(--muted); }
+    main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
+    .toolbar { margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+    .toolbar input.inline {
+      width: 8rem;
+      padding: 0.4rem 0.5rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.82rem;
+    }
+    .auth-msg { font-size: 0.8rem; color: var(--muted); max-width: 14rem; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      padding: 0.45rem 0.9rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+    button.primary { background: var(--accent); color: #0a1628; }
+    button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+    button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    button.danger-solid { background: var(--danger); color: #1a0505; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+      background: var(--panel);
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    th, td { padding: 0.65rem 0.85rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    tr:last-child td { border-bottom: none; }
+    .id { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .toast {
+      position: fixed;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      max-width: 420px;
+      padding: 0.85rem 1rem;
+      border-radius: 10px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 32px rgba(0,0,0,.45);
+      font-size: 0.875rem;
+      z-index: 100;
+      display: none;
+    }
+    .toast.err { border-color: var(--danger); color: #ffb4b4; }
+    .toast.ok { border-color: #4caf50; color: #c8e6c9; }
+    .backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.65);
+      z-index: 50;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .backdrop.show { display: flex; }
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      max-width: 480px;
+      width: 100%;
+      padding: 1.35rem;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal h2 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+    .modal .warn {
+      font-size: 0.82rem;
+      color: var(--danger);
+      margin: 0 0 1rem;
+      padding: 0.65rem 0.75rem;
+      background: rgba(255,107,107,.08);
+      border-radius: 8px;
+      border: 1px solid rgba(255,107,107,.25);
+    }
+    label { display: block; font-size: 0.78rem; color: var(--muted); margin: 0.75rem 0 0.25rem; }
+    input[type="text"] {
+      width: 100%;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+    .phrase-hint { font-size: 0.8rem; color: var(--accent); margin-top: 0.35rem; }
+    .check { margin-top: 1rem; display: flex; align-items: flex-start; gap: 0.5rem; font-size: 0.85rem; }
+    .check input { margin-top: 0.2rem; }
+    .actions { margin-top: 1.25rem; display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: wrap; }
+    .empty { color: var(--muted); padding: 2rem; text-align: center; }
+    textarea.create-setting {
+      width: 100%;
+      min-height: 5rem;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.88rem;
+      font-family: inherit;
+      resize: vertical;
+    }
+    .hint-xs { font-size: 0.76rem; color: var(--muted); margin-top: 0.25rem; }
+    input[type="number"].narrow { width: 100%; max-width: 8rem; font-variant-numeric: tabular-nums; }
+    .runtime-wrap { width: 100%; flex-basis: 100%; margin-top: 0.5rem; }
+    .runtime-bar {
+      display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
+      padding: 0.5rem 0.65rem; border-radius: 10px; border: 1px solid var(--border);
+      background: rgba(26,35,50,.65); font-size: 0.78rem;
+    }
+    .chip {
+      display: inline-flex; align-items: center; gap: 0.25rem;
+      padding: 0.2rem 0.5rem; border-radius: 999px; background: var(--bg); border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .chip b { color: var(--muted); font-weight: 500; }
+    .chip.warn { border-color: #b8860b; color: #e6c35c; }
+    .modal.wide { max-width: 760px; max-height: 92vh; }
+    select.director-select {
+      width: 100%; max-width: 20rem; padding: 0.45rem 0.5rem; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.85rem;
+    }
+    .section-h {
+      margin: 1rem 0 0.35rem; font-size: 0.82rem; font-weight: 600; color: var(--accent);
+      border-bottom: 1px solid var(--border); padding-bottom: 0.25rem;
+    }
+    pre.jsondump {
+      margin: 0; padding: 0.65rem; border-radius: 8px; border: 1px solid var(--border);
+      background: #0a0e14; color: #b8c5d6; font-size: 0.72rem; line-height: 1.4;
+      max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    .director-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.75rem 0 0; }
+    table.task-mini-table { width: 100%; font-size: 0.78rem; border-collapse: collapse; margin-top: 0.35rem; }
+    table.task-mini-table th, table.task-mini-table td {
+      padding: 0.35rem 0.45rem; border: 1px solid var(--border); text-align: left; vertical-align: middle;
+    }
+    table.task-mini-table th { color: var(--muted); font-weight: 500; }
+    button.sm { padding: 0.2rem 0.45rem; font-size: 0.72rem; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>小说列表</h1>
+  <p>与后端同机或已配置 CORS 时打开本页。含 <strong>运行时配置</strong> 与按书的 <strong>导演台</strong>（监控 / M9 / 流水线 / 任务）。删除需多步确认，无法撤销。</p>
+</header>
+<main>
+  <div class="toolbar">
+    <button type="button" class="ghost" id="btnOpenCreate">新建小说…</button>
+    <button type="button" class="primary" id="btnRefresh">刷新列表</button>
+    <button type="button" class="ghost" id="btnRefreshRuntime">刷新运行时配置</button>
+    <span class="id" id="apiHint"></span>
+    <span style="flex:1;min-width:0"></span>
+    <span class="auth-msg" id="authStatus"></span>
+    <span id="loginPanel" style="display:none; align-items:center; gap:0.35rem; flex-wrap:wrap;">
+      <input type="text" class="inline" id="loginUser" autocomplete="username" placeholder="管理员账号"/>
+      <input type="password" class="inline" id="loginPass" autocomplete="current-password" placeholder="密码"/>
+      <button type="button" class="primary" id="btnLogin">登录</button>
+    </span>
+    <button type="button" class="ghost" id="btnLogout" style="display:none;">退出</button>
+  </div>
+  <div class="runtime-wrap">
+    <div class="runtime-bar" id="runtimeBar" aria-live="polite">加载运行时配置…</div>
+  </div>
+  <div id="tableWrap"></div>
+</main>
+<div class="backdrop" id="backdropCreate" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="createDlgTitle" style="max-width:520px;">
+    <h2 id="createDlgTitle">新建小说</h2>
+    <p class="hint-xs" style="margin:0 0 0.75rem;">提交后会排队生成大纲与前几章；大纲节奏参数仅影响<strong>首次大纲</strong>提示词规模。</p>
+    <div>
+      <label for="createTopic">题材（必填）</label>
+      <input type="text" id="createTopic" autocomplete="off" placeholder="例如：修仙宗门内的记账先生逆袭"/>
+    </div>
+    <div>
+      <label for="createSetting">世界观 / 设定（可选）</label>
+      <textarea id="createSetting" class="create-setting" placeholder="时代、基调、禁忌、主角初始处境等"></textarea>
+    </div>
+    <div style="display:flex; gap:1rem; flex-wrap:wrap; margin-top:0.5rem;">
+      <div>
+        <label for="createOutlineDetailed">开篇细纲章数</label>
+        <input type="number" class="narrow" id="createOutlineDetailed" min="15" max="150" step="1"/>
+        <p class="hint-xs" id="hintDetailed"></p>
+      </div>
+      <div>
+        <label for="createOutlineRoadmap">路线图覆盖至第 N 章</label>
+        <input type="number" class="narrow" id="createOutlineRoadmap" min="30" max="600" step="5"/>
+        <p class="hint-xs" id="hintRoadmap"></p>
+      </div>
+    </div>
+    <label class="check">
+      <input type="checkbox" id="createHotMeme"/>
+      <span>少量网络热梗（大纲/正文）</span>
+    </label>
+    <div class="actions">
+      <button type="button" class="ghost" id="btnCreateCancel">取消</button>
+      <button type="button" class="primary" id="btnCreateSubmit">提交排队</button>
+    </div>
+  </div>
+</div>
+<div class="backdrop" id="backdrop" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dlgTitle">
+    <h2 id="dlgTitle">永久删除小说</h2>
+    <p class="warn" id="dlgWarn"></p>
+    <div>
+      <label for="fTitle">请完整输入当前书名（与列表一致）</label>
+      <input type="text" id="fTitle" autocomplete="off" placeholder="在此粘贴或输入书名"/>
+    </div>
+    <div>
+      <label for="fPhrase">请原样抄写下列确认句（一字不差）</label>
+      <p class="phrase-hint" id="phraseCopy"></p>
+      <input type="text" id="fPhrase" autocomplete="off" placeholder="确认句"/>
+    </div>
+    <label class="check">
+      <input type="checkbox" id="fAck"/>
+      <span>我已知晓：删除后本书所有章节、角色档案、事实表与任务记录将<strong>永久清除且不可恢复</strong>。</span>
+    </label>
+    <div class="actions">
+      <button type="button" class="ghost" id="btnCancel">取消</button>
+      <button type="button" class="danger-solid" id="btnConfirm" disabled>确认永久删除</button>
+    </div>
+  </div>
+</div>
+<div class="backdrop" id="backdropDirector" aria-hidden="true">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="directorTitle">
+    <h2 id="directorTitle">导演台</h2>
+    <p class="hint-xs" id="directorSubtitle" style="margin:0 0 0.5rem;">监控 / M9 / 任务 + 写路径（pipeline、热梗、微参、书籍备注、continue、auto-continue）。须能访问该书（与列表相同 JWT）。</p>
+    <div class="director-actions">
+      <button type="button" class="primary" id="btnDirectorRefresh">刷新本面板</button>
+      <button type="button" class="ghost" id="btnDirectorClose">关闭</button>
+    </div>
+    <div class="section-h">写作监控 <span class="id">GET …/writing-monitor</span></div>
+    <pre class="jsondump" id="directorMonitor">加载中…</pre>
+    <div class="section-h">跨章叙事 M9 <span class="id">GET …/narrative-state</span></div>
+    <pre class="jsondump" id="directorM9">加载中…</pre>
+    <div class="section-h">流水线快照 <span class="id">GET …/pipeline</span></div>
+    <pre class="jsondump" id="directorPipeline">加载中…</pre>
+    <div class="section-h">写路径·全书 <span class="id">POST …/pipeline · …/hot-meme · …/writing-style-params</span></div>
+    <p class="hint-xs" style="margin:0 0 0.5rem;">与 API 总表一致；仅影响<strong>后续</strong>生成。`writingStyleParams` 须为后端可解析的 JSON（见《前端与用户指引》）。</p>
+    <label for="directorPipelineSelect">切换流水线 <span class="id">fromPath 别名</span></label>
+    <select id="directorPipelineSelect" class="director-select" aria-label="流水线">
+      <option value="power-fantasy">power-fantasy（默认爽文）</option>
+      <option value="light-novel">light-novel（轻小说）</option>
+      <option value="slice-of-life">slice-of-life（日常）</option>
+      <option value="period-drama">period-drama（年代）</option>
+      <option value="vulgar">vulgar（粗俗风）</option>
+    </select>
+    <div class="director-actions" style="margin-top:0.35rem;">
+      <button type="button" class="primary" id="btnDirectorPipelineApply">应用流水线</button>
+    </div>
+    <label class="check" style="margin-top:0.75rem;">
+      <input type="checkbox" id="directorHotMeme"/>
+      <span>全书「少量网络热梗」<span class="id">POST …/hot-meme</span></span>
+    </label>
+    <div class="director-actions" style="margin-top:0.35rem;">
+      <button type="button" class="ghost" id="btnDirectorHotMemeSave">保存热梗开关</button>
+    </div>
+    <label for="directorStyleParams" style="margin-top:0.75rem;">文风微参 JSON（字符串存库；可贴根对象，含可选 <code>narrative</code>）</label>
+    <textarea id="directorStyleParams" class="create-setting" style="min-height:5rem" placeholder='例如：{"dialogueRatioHint":"high","humorLevel":"low"} 或留空后点清空'></textarea>
+    <div class="director-actions" style="margin-top:0.35rem;">
+      <button type="button" class="primary" id="btnDirectorStyleSave">保存文风微参</button>
+      <button type="button" class="ghost" id="btnDirectorStyleClear">清空微参</button>
+    </div>
+    <label for="directorBookPlatform" style="margin-top:0.75rem;">连载平台 serializationPlatform <span class="id">POST …/book-meta</span>（不参与 AI）</label>
+    <input type="text" id="directorBookPlatform" style="width:100%;max-width:22rem;padding:0.45rem 0.55rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.88rem;"/>
+    <label for="directorBookNote" style="margin-top:0.5rem;">创作说明 creatorNote</label>
+    <textarea id="directorBookNote" class="create-setting" style="min-height:3rem" placeholder="仅展示与项目管理"></textarea>
+    <div class="director-actions" style="margin-top:0.35rem;">
+      <button type="button" class="ghost" id="btnDirectorBookMeta">保存书籍备注</button>
+    </div>
+    <div class="section-h">生成任务列表 <span class="id">GET …/generation-tasks</span></div>
+    <pre class="jsondump" id="directorTasks">加载中…</pre>
+    <div class="section-h">任务快捷操作 <span class="id">POST …/tasks/{taskId}/cancel|kick|retry</span></div>
+    <div id="directorTaskTableWrap" class="hint-xs">加载中…</div>
+    <div class="section-h">续写一章 <span class="id">POST …/continue</span></div>
+    <p class="hint-xs" style="margin:0 0 0.5rem;">与 web-agent 调同一接口；留空章节号表示<strong>下一空章</strong>。</p>
+    <label for="directorContinueChapter" style="margin-top:0.5rem;">目标章节号（可选）</label>
+    <input type="number" class="narrow" id="directorContinueChapter" min="1" step="1" placeholder="留空=下一章"/>
+    <label for="directorContinueHint">本章附加设定 generationSetting（可选）</label>
+    <textarea id="directorContinueHint" class="create-setting" style="min-height:3.5rem" placeholder="仅本章提示，可留空"></textarea>
+    <div class="director-actions" style="margin-top:0.5rem;">
+      <button type="button" class="primary" id="btnDirectorContinue">续写一章（入队）</button>
+    </div>
+    <div class="section-h">自动续写到目标章 <span class="id">POST …/auto-continue</span></div>
+    <p class="hint-xs">targetChapterCount 须 <strong>大于</strong>当前已写章数；上限见运行时 <code>autoContinueMaxTarget</code>。</p>
+    <label for="directorAutoTarget">目标章号（全书）</label>
+    <input type="number" class="narrow" id="directorAutoTarget" min="1" step="1" placeholder="如 30"/>
+    <label for="directorAutoSetting">区间附加设定 generationSetting（可选）</label>
+    <textarea id="directorAutoSetting" class="create-setting" style="min-height:3rem"></textarea>
+    <div class="director-actions" style="margin-top:0.35rem;">
+      <button type="button" class="primary" id="btnDirectorAuto">自动续写入队</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  const apiBase = '';
+  const TOKEN_KEY = 'novelAdminJwt';
+  const toastEl = document.getElementById('toast');
+  const backdrop = document.getElementById('backdrop');
+  const backdropCreate = document.getElementById('backdropCreate');
+  const tableWrap = document.getElementById('tableWrap');
+  const loginPanel = document.getElementById('loginPanel');
+  const btnLogout = document.getElementById('btnLogout');
+  const authStatusEl = document.getElementById('authStatus');
+  document.getElementById('apiHint').textContent = '接口前缀: ' + (apiBase || location.origin) + '/api/novel';
+
+  let pendingNovelId = null;
+  let requiredPhrase = '';
+  let authToken = localStorage.getItem(TOKEN_KEY) || '';
+  let session = { securityEnabled: false, isAdmin: true };
+  let frontendRuntime = {};
+  let directorNovelId = null;
+  const backdropDirector = document.getElementById('backdropDirector');
+
+  function baseHeaders() {
+    const h = { 'Accept': 'application/json', 'Content-Type': 'application/json' };
+    if (authToken) h['Authorization'] = 'Bearer ' + authToken;
+    return h;
+  }
+
+  function renderAuthBar() {
+    if (!session.securityEnabled) {
+      authStatusEl.textContent = '未启用登录（全部可见，均可改书库标签）';
+      loginPanel.style.display = 'none';
+      btnLogout.style.display = 'none';
+      return;
+    }
+    if (session.isAdmin) {
+      authStatusEl.textContent = '管理员：可查看全部小说并修改「公共 / 仅管理员」';
+      loginPanel.style.display = 'none';
+      btnLogout.style.display = authToken ? 'inline-block' : 'none';
+    } else {
+      authStatusEl.textContent = '访客：列表仅显示「公共」小说';
+      loginPanel.style.display = 'flex';
+      btnLogout.style.display = 'none';
+    }
+  }
+
+  async function refreshSession() {
+    try {
+      const m = await fetchJson(apiBase + '/api/auth/me');
+      session.securityEnabled = !!m.securityEnabled;
+      session.isAdmin = !session.securityEnabled || !!m.authenticated;
+      renderAuthBar();
+    } catch (e) {
+      session.securityEnabled = true;
+      session.isAdmin = !!authToken;
+      renderAuthBar();
+    }
+  }
+
+  function showToast(msg, isErr) {
+    toastEl.textContent = msg;
+    toastEl.className = 'toast ' + (isErr ? 'err' : 'ok');
+    toastEl.style.display = 'block';
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(function () { toastEl.style.display = 'none'; }, 5200);
+  }
+
+  async function fetchJson(url, opts) {
+    opts = opts || {};
+    const headers = Object.assign({}, baseHeaders(), opts.headers || {});
+    const r = await fetch(url, Object.assign({}, opts, { headers: headers }));
+    const text = await r.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) {}
+    if (!r.ok) {
+      const m = data && (data.message || data.msg) || ('HTTP ' + r.status);
+      throw new Error(m);
+    }
+    return data;
+  }
+
+  async function loadFrontendRuntime() {
+    var el = document.getElementById('runtimeBar');
+    try {
+      var r = await fetchJson(apiBase + '/api/novel/config/frontend-runtime');
+      frontendRuntime = r;
+      var sec = r.securityEnabled ? '开' : '关';
+      var ne = r.narrativeEngineEnabled !== false ? '开' : '关';
+      var m7 = r.m7ArtifactEnabled !== false ? '开' : '关';
+      var m9 = r.m9CrosscutEnabled ? '开' : '关';
+      var adc = (r.autoContinueDefaultTarget != null ? r.autoContinueDefaultTarget : '?') + ' / max ' + (r.autoContinueMaxTarget != null ? r.autoContinueMaxTarget : '?');
+      var chips = [
+        ['安全 JWT', sec],
+        ['叙事引擎', ne],
+        ['M7 侧车', m7],
+        ['M9 跨章', m9],
+        ['autoContinue 默认/上限', adc]
+      ];
+      var m9w = !r.m9CrosscutEnabled ? '<span class="chip warn"><b>M9</b> 关闭时无跨章快照写入；导演台仍可看接口返回</span>' : '';
+      el.innerHTML = chips.map(function (cv) {
+        return '<span class="chip"><b>' + escapeHtml(cv[0]) + '</b> ' + escapeHtml(cv[1]) + '</span>';
+      }).join(' ') + m9w;
+    } catch (e) {
+      el.innerHTML = '<span class="chip warn">运行时配置失败: ' + escapeHtml(e.message) + '</span>';
+    }
+  }
+
+  function openDirectorModal(novelId, title) {
+    directorNovelId = novelId;
+    document.getElementById('directorTitle').textContent = '导演台 · ID ' + novelId;
+    document.getElementById('directorSubtitle').textContent = (title ? '《' + title + '》' : '') + ' 监控 / M9 / 任务 / 写路径 / continue / auto-continue。';
+    document.getElementById('directorContinueChapter').value = '';
+    document.getElementById('directorContinueHint').value = '';
+    document.getElementById('directorAutoTarget').value = '';
+    document.getElementById('directorAutoSetting').value = '';
+    ['directorMonitor', 'directorM9', 'directorPipeline', 'directorTasks'].forEach(function (id) {
+      document.getElementById(id).textContent = '加载中…';
+    });
+    document.getElementById('directorTaskTableWrap').textContent = '加载中…';
+    backdropDirector.classList.add('show');
+    backdropDirector.setAttribute('aria-hidden', 'false');
+    loadDirectorPanel();
+  }
+
+  function closeDirectorModal() {
+    backdropDirector.classList.remove('show');
+    backdropDirector.setAttribute('aria-hidden', 'true');
+    directorNovelId = null;
+  }
+
+  function renderDirectorTaskActions(tasksPayload, loadError) {
+    var wrap = document.getElementById('directorTaskTableWrap');
+    if (loadError) {
+      wrap.innerHTML = '<p class="hint-xs">' + escapeHtml(loadError) + '</p>';
+      return;
+    }
+    if (!tasksPayload || tasksPayload.tasks == null) {
+      wrap.innerHTML = '<p class="hint-xs">无任务数组（响应异常）。</p>';
+      return;
+    }
+    var tasks = tasksPayload.tasks;
+    if (!tasks.length) {
+      wrap.innerHTML = '<p class="hint-xs">本书暂无生成任务记录。</p>';
+      return;
+    }
+    var head = '<table class="task-mini-table"><thead><tr><th>ID</th><th>类型</th><th>状态</th><th>区间</th><th>操作</th></tr></thead><tbody>';
+    var body = tasks.map(function (t) {
+      var st = String(t.status || '').toUpperCase();
+      var range = (t.rangeFrom != null && t.rangeTo != null) ? (t.rangeFrom + '–' + t.rangeTo) : '—';
+      var canCancel = st === 'PENDING' || st === 'RUNNING';
+      var canKick = st === 'PENDING';
+      var canRetry = st === 'FAILED' || st === 'CANCELLED';
+      var id = t.id;
+      var btns = '';
+      btns += '<button type="button" class="ghost sm"' + (canCancel ? '' : ' disabled title="仅 PENDING/RUNNING 可取消"') + ' data-task-action="cancel" data-task-id="' + escapeHtml(String(id)) + '">取消</button> ';
+      btns += '<button type="button" class="ghost sm"' + (canKick ? '' : ' disabled title="仅 PENDING 可 Kick"') + ' data-task-action="kick" data-task-id="' + escapeHtml(String(id)) + '">Kick</button> ';
+      btns += '<button type="button" class="ghost sm"' + (canRetry ? '' : ' disabled title="仅 FAILED/CANCELLED 可重试"') + ' data-task-action="retry" data-task-id="' + escapeHtml(String(id)) + '">重试</button>';
+      return '<tr><td class="id">' + id + '</td><td>' + escapeHtml(String(t.taskType || '')) + '</td><td>' + escapeHtml(st) + '</td><td>' + escapeHtml(range) + '</td><td>' + btns + '</td></tr>';
+    }).join('');
+    wrap.innerHTML = head + body + '</tbody></table><p class="hint-xs" style="margin-top:0.5rem;">与 API 总表一致：<strong>取消</strong>进行中或排队；<strong>Kick</strong>仅唤醒 PENDING；<strong>重试</strong>失败或已取消任务。</p>';
+  }
+
+  async function loadDirectorPanel() {
+    if (directorNovelId == null) return;
+    var nid = directorNovelId;
+    var pairs = [
+      ['directorMonitor', '/api/novel/' + nid + '/writing-monitor'],
+      ['directorM9', '/api/novel/' + nid + '/narrative-state'],
+      ['directorPipeline', '/api/novel/' + nid + '/pipeline'],
+      ['directorTasks', '/api/novel/' + nid + '/generation-tasks']
+    ];
+    var tasksPayload = null;
+    var tasksErr = null;
+    for (var i = 0; i < pairs.length; i++) {
+      var elId = pairs[i][0];
+      var path = pairs[i][1];
+      try {
+        var data = await fetchJson(apiBase + path);
+        document.getElementById(elId).textContent = JSON.stringify(data, null, 2);
+        if (elId === 'directorPipeline') syncDirectorWriteForms(data);
+        if (elId === 'directorTasks') tasksPayload = data;
+      } catch (err) {
+        var msg = '加载失败: ' + (err && err.message ? err.message : err);
+        document.getElementById(elId).textContent = msg;
+        if (elId === 'directorTasks') tasksErr = msg;
+      }
+    }
+    renderDirectorTaskActions(tasksPayload, tasksErr);
+  }
+
+  function pipelineEnumToSelectValue(enumName) {
+    var u = String(enumName || '').toUpperCase();
+    var m = {
+      'POWER_FANTASY': 'power-fantasy',
+      'LIGHT_NOVEL': 'light-novel',
+      'SLICE_OF_LIFE': 'slice-of-life',
+      'PERIOD_DRAMA': 'period-drama',
+      'VULGAR': 'vulgar'
+    };
+    return m[u] || 'power-fantasy';
+  }
+
+  function syncDirectorWriteForms(pipe) {
+    if (!pipe || pipe.pipeline == null) return;
+    var sel = document.getElementById('directorPipelineSelect');
+    if (sel) sel.value = pipelineEnumToSelectValue(pipe.pipeline);
+    var hm = document.getElementById('directorHotMeme');
+    if (hm) hm.checked = pipe.hotMemeEnabled === true;
+    var ta = document.getElementById('directorStyleParams');
+    if (ta) {
+      var wsp = pipe.writingStyleParams;
+      ta.value = (wsp == null || wsp === undefined) ? '' : String(wsp);
+    }
+    var bp = document.getElementById('directorBookPlatform');
+    if (bp) bp.value = pipe.serializationPlatform != null ? String(pipe.serializationPlatform) : '';
+    var bn = document.getElementById('directorBookNote');
+    if (bn) bn.value = pipe.creatorNote != null ? String(pipe.creatorNote) : '';
+  }
+
+  async function directorPostMapOk(url, bodyObj) {
+    var payload = bodyObj === undefined || bodyObj === null ? '{}' : JSON.stringify(bodyObj);
+    var data = await fetchJson(url, { method: 'POST', body: payload });
+    var ok = data && (data.status === 'success' || data.code === 'OK');
+    if (!ok) throw new Error((data && data.message) || '请求失败');
+    return data;
+  }
+
+  async function postNovelTaskAction(action, taskId) {
+    var url = apiBase + '/api/novel/tasks/' + taskId + '/' + action;
+    var data = await fetchJson(url, { method: 'POST', body: '{}' });
+    var ok = data && (data.status === 'success' || data.code === 'OK');
+    if (!ok) throw new Error((data && data.message) || '操作失败');
+    return data.message || '已受理';
+  }
+
+  function renderList(rows) {
+    if (!rows || !rows.length) {
+      tableWrap.innerHTML = '<div class="empty">暂无小说，请先在业务里创建。</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>ID</th><th>书名</th><th>题材</th><th>书库</th><th>操作</th></tr></thead><tbody>';
+    rows.forEach(function (n) {
+      var pub = n.libraryPublic !== false;
+      html += '<tr><td class="id">' + n.id + '</td><td>' + escapeHtml(n.title || '') + '</td><td>' + escapeHtml(n.topic || '') + '</td>';
+      html += '<td>';
+      html += pub ? '<span class="id">公共</span>' : '<span style="color:var(--accent)">仅管理员</span>';
+      if (session.isAdmin) {
+        html += ' <button type="button" class="ghost" data-vis="' + n.id + '" data-next="' + (!pub) + '">' + (pub ? '设为仅管理员' : '设为公共') + '</button>';
+      }
+      html += '</td>';
+      html += '<td><button type="button" class="ghost" data-director="' + n.id + '" data-title="' + escapeHtml(n.title || '') + '">导演台</button> ';
+      html += '<button type="button" class="danger" data-del="' + n.id + '">删除…</button></td></tr>';
+    });
+    html += '</tbody></table>';
+    tableWrap.innerHTML = html;
+    tableWrap.querySelectorAll('[data-director]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = Number(btn.getAttribute('data-director'));
+        var rawTitle = btn.getAttribute('data-title') || '';
+        openDirectorModal(id, rawTitle);
+      });
+    });
+    tableWrap.querySelectorAll('[data-del]').forEach(function (btn) {
+      btn.addEventListener('click', function () { openDeleteModal(Number(btn.getAttribute('data-del'))); });
+    });
+    tableWrap.querySelectorAll('[data-vis]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var nid = Number(btn.getAttribute('data-vis'));
+        var nextPub = btn.getAttribute('data-next') === 'true';
+        try {
+          await fetchJson(apiBase + '/api/novel/' + nid + '/library-visibility', {
+            method: 'POST',
+            body: JSON.stringify({ libraryPublic: nextPub })
+          });
+          showToast('书库可见性已更新', false);
+          loadList();
+        } catch (e) {
+          showToast(e.message, true);
+        }
+      });
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  async function loadList() {
+    try {
+      const list = await fetchJson(apiBase + '/api/novel/list');
+      renderList(list);
+    } catch (e) {
+      showToast('加载失败: ' + e.message, true);
+      tableWrap.innerHTML = '<div class="empty">无法加载列表（请确认已登录同源或后端已启动）。</div>';
+    }
+  }
+
+  async function applyOutlineDefaultsToForm() {
+    try {
+      var d = await fetchJson(apiBase + '/api/novel/config/outline-plan-defaults');
+      var det = document.getElementById('createOutlineDetailed');
+      var road = document.getElementById('createOutlineRoadmap');
+      det.min = d.detailedPrefixChaptersMin != null ? d.detailedPrefixChaptersMin : 15;
+      det.max = d.detailedPrefixChaptersMax != null ? d.detailedPrefixChaptersMax : 150;
+      road.min = d.minRoadmapChaptersMin != null ? d.minRoadmapChaptersMin : 30;
+      road.max = d.minRoadmapChaptersMax != null ? d.minRoadmapChaptersMax : 600;
+      det.value = d.detailedPrefixChapters != null ? d.detailedPrefixChapters : 40;
+      road.value = d.minRoadmapChapters != null ? d.minRoadmapChapters : 120;
+      document.getElementById('hintDetailed').textContent = '允许 ' + det.min + '～' + det.max;
+      document.getElementById('hintRoadmap').textContent = '允许 ' + road.min + '～' + road.max;
+    } catch (err) {
+      var det = document.getElementById('createOutlineDetailed');
+      var road = document.getElementById('createOutlineRoadmap');
+      det.value = 40;
+      road.value = 120;
+      document.getElementById('hintDetailed').textContent = '';
+      document.getElementById('hintRoadmap').textContent = '';
+    }
+  }
+
+  function openCreateModal() {
+    document.getElementById('createTopic').value = '';
+    document.getElementById('createSetting').value = '';
+    document.getElementById('createHotMeme').checked = false;
+    applyOutlineDefaultsToForm().then(function () {
+      backdropCreate.classList.add('show');
+      backdropCreate.setAttribute('aria-hidden', 'false');
+      document.getElementById('createTopic').focus();
+    });
+  }
+
+  function closeCreateModal() {
+    backdropCreate.classList.remove('show');
+    backdropCreate.setAttribute('aria-hidden', 'true');
+  }
+
+  async function openDeleteModal(novelId) {
+    pendingNovelId = novelId;
+    document.getElementById('fTitle').value = '';
+    document.getElementById('fPhrase').value = '';
+    document.getElementById('fAck').checked = false;
+    document.getElementById('btnConfirm').disabled = true;
+    try {
+      const res = await fetchJson(apiBase + '/api/novel/' + novelId + '/delete-guard');
+      requiredPhrase = res.requiredPhrase || '';
+      const title = res.title || '';
+      const active = res.activeTaskCount != null ? res.activeTaskCount : 0;
+      document.getElementById('dlgWarn').textContent =
+        '即将删除 ID ' + novelId + '《' + title + '》。进行中任务约 ' + active + ' 个，提交后会尝试取消。' + (res.hint ? ' ' + res.hint : '');
+      document.getElementById('phraseCopy').textContent = '「' + requiredPhrase + '」';
+      backdrop.classList.add('show');
+      backdrop.setAttribute('aria-hidden', 'false');
+      document.getElementById('fTitle').focus();
+    } catch (e) {
+      showToast(e.message, true);
+      pendingNovelId = null;
+    }
+  }
+
+  function closeModal() {
+    backdrop.classList.remove('show');
+    backdrop.setAttribute('aria-hidden', 'true');
+    pendingNovelId = null;
+  }
+
+  function syncConfirmEnabled() {
+    const ok = document.getElementById('fAck').checked &&
+      document.getElementById('fTitle').value.trim().length > 0 &&
+      document.getElementById('fPhrase').value.trim().length > 0;
+    document.getElementById('btnConfirm').disabled = !ok;
+  }
+
+  document.getElementById('btnRefresh').addEventListener('click', loadList);
+  document.getElementById('btnRefreshRuntime').addEventListener('click', function () {
+    loadFrontendRuntime().then(function () { showToast('运行时配置已刷新', false); }).catch(function () {});
+  });
+  document.getElementById('btnDirectorClose').addEventListener('click', closeDirectorModal);
+  document.getElementById('btnDirectorRefresh').addEventListener('click', function () {
+    loadDirectorPanel().then(function () { showToast('导演台已刷新', false); });
+  });
+  backdropDirector.addEventListener('click', function (ev) { if (ev.target === backdropDirector) closeDirectorModal(); });
+  document.getElementById('btnDirectorPipelineApply').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    var v = document.getElementById('directorPipelineSelect').value;
+    if (!window.confirm('将 POST pipeline=' + v + '（后续章节按新流水线），确认？')) return;
+    try {
+      await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/pipeline', { pipeline: v });
+      showToast('流水线已更新', false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorHotMemeSave').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    var en = document.getElementById('directorHotMeme').checked;
+    try {
+      await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/hot-meme', { enabled: en });
+      showToast('热梗开关已保存', false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorStyleSave').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    var raw = document.getElementById('directorStyleParams').value.trim();
+    if (!raw) {
+      showToast('请填写合法 JSON，或使用「清空微参」', true);
+      return;
+    }
+    try {
+      JSON.parse(raw);
+    } catch (e2) {
+      showToast('JSON 无法解析: ' + e2.message, true);
+      return;
+    }
+    if (!window.confirm('将 POST writingStyleParamsRaw（仅影响后续生成），确认？')) return;
+    try {
+      await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/writing-style-params', { writingStyleParamsRaw: raw });
+      showToast('文风微参已保存', false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorStyleClear').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    if (!window.confirm('将 POST 空体以清空文风微参，确认？')) return;
+    try {
+      await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/writing-style-params', {});
+      showToast('文风微参已清空', false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorBookMeta').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    var plat = document.getElementById('directorBookPlatform').value.trim();
+    var note = document.getElementById('directorBookNote').value.trim();
+    if (!window.confirm('将 POST book-meta（连载平台/创作说明），确认？')) return;
+    try {
+      await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/book-meta', {
+        serializationPlatform: plat,
+        creatorNote: note
+      });
+      showToast('书籍备注已保存', false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorAuto').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    var tgtStr = document.getElementById('directorAutoTarget').value.trim();
+    var tgt = parseInt(tgtStr, 10);
+    if (!Number.isFinite(tgt) || tgt < 1) {
+      showToast('请填写有效的目标章号（≥1）', true);
+      return;
+    }
+    var gs = document.getElementById('directorAutoSetting').value.trim();
+    var body = { targetChapterCount: tgt };
+    if (gs) body.generationSetting = gs;
+    if (!window.confirm('将 POST auto-continue 至第 ' + tgt + ' 章（区间任务），确认？')) return;
+    try {
+      var data = await directorPostMapOk(apiBase + '/api/novel/' + directorNovelId + '/auto-continue', body);
+      var extra = (data.taskId != null ? ' taskId=' + data.taskId : '') +
+        (data.rangeFrom != null && data.rangeTo != null ? ' 区间 ' + data.rangeFrom + '–' + data.rangeTo : '');
+      showToast((data.message || '已入队') + extra, false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnDirectorContinue').addEventListener('click', async function () {
+    if (directorNovelId == null) return;
+    if (!window.confirm('将向队列提交 POST /api/novel/' + directorNovelId + '/continue，确认？')) return;
+    var nid = directorNovelId;
+    var cnStr = document.getElementById('directorContinueChapter').value.trim();
+    var gen = document.getElementById('directorContinueHint').value.trim();
+    var body = {};
+    if (cnStr) {
+      var cn = parseInt(cnStr, 10);
+      if (!Number.isFinite(cn) || cn < 1) { showToast('章节号须为 ≥1 的整数', true); return; }
+      body.chapterNumber = cn;
+    }
+    if (gen) body.generationSetting = gen;
+    var payload = Object.keys(body).length ? JSON.stringify(body) : '{}';
+    try {
+      var data = await fetchJson(apiBase + '/api/novel/' + nid + '/continue', { method: 'POST', body: payload });
+      var ok = data && (data.status === 'success' || data.code === 'OK');
+      if (!ok) { showToast((data && data.message) || '续写入队失败', true); return; }
+      var extra = (data.taskId != null ? ' taskId=' + data.taskId : '') + (data.targetChapter != null ? ' →第' + data.targetChapter + '章' : '');
+      showToast((data.message || '已入队') + extra, false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('directorTaskTableWrap').addEventListener('click', async function (ev) {
+    var btn = ev.target.closest('[data-task-action]');
+    if (!btn || btn.disabled) return;
+    var action = btn.getAttribute('data-task-action');
+    var tid = btn.getAttribute('data-task-id');
+    if (!action || !tid) return;
+    try {
+      var msg = await postNovelTaskAction(action, tid);
+      showToast(msg, false);
+      await loadDirectorPanel();
+    } catch (e) {
+      showToast(e.message || String(e), true);
+    }
+  });
+  document.getElementById('btnOpenCreate').addEventListener('click', openCreateModal);
+  document.getElementById('btnCreateCancel').addEventListener('click', closeCreateModal);
+  backdropCreate.addEventListener('click', function (ev) { if (ev.target === backdropCreate) closeCreateModal(); });
+  document.getElementById('btnCreateSubmit').addEventListener('click', async function () {
+    var topic = document.getElementById('createTopic').value.trim();
+    if (!topic) { showToast('请填写题材', true); return; }
+    var settingVal = document.getElementById('createSetting').value.trim();
+    var od = parseInt(document.getElementById('createOutlineDetailed').value, 10);
+    var om = parseInt(document.getElementById('createOutlineRoadmap').value, 10);
+    var body = {
+      topic: topic,
+      hotMemeEnabled: document.getElementById('createHotMeme').checked,
+      outlineDetailedPrefixChapters: Number.isFinite(od) ? od : null,
+      outlineMinRoadmapChapters: Number.isFinite(om) ? om : null
+    };
+    if (settingVal) body.generationSetting = settingVal;
+    try {
+      var res = await fetchJson(apiBase + '/api/novel/create', { method: 'POST', body: JSON.stringify(body) });
+      var ok = res && (res.status === 'success' || res.code === 'OK');
+      if (!ok) { showToast((res && res.message) || '创建失败', true); return; }
+      showToast((res.message || '已排队') + (res.novelId != null ? ' · ID ' + res.novelId : ''), false);
+      closeCreateModal();
+      loadList();
+    } catch (e) {
+      showToast(e.message, true);
+    }
+  });
+  document.getElementById('btnLogin').addEventListener('click', async function () {
+    var u = document.getElementById('loginUser').value.trim();
+    var p = document.getElementById('loginPass').value;
+    try {
+      var r = await fetch(apiBase + '/api/auth/login', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p })
+      });
+      var data = await r.json().catch(function () { return {}; });
+      if (!r.ok) throw new Error(data.message || '登录失败');
+      authToken = data.token || '';
+      localStorage.setItem(TOKEN_KEY, authToken);
+      document.getElementById('loginPass').value = '';
+      await refreshSession();
+      await loadList();
+      showToast('已登录', false);
+    } catch (e) {
+      showToast(e.message || '登录失败', true);
+    }
+  });
+  btnLogout.addEventListener('click', async function () {
+    authToken = '';
+    localStorage.removeItem(TOKEN_KEY);
+    await refreshSession();
+    await loadList();
+    showToast('已退出', false);
+  });
+  document.getElementById('btnCancel').addEventListener('click', closeModal);
+  backdrop.addEventListener('click', function (ev) { if (ev.target === backdrop) closeModal(); });
+  ['fTitle', 'fPhrase', 'fAck'].forEach(function (id) {
+    document.getElementById(id).addEventListener('input', syncConfirmEnabled);
+    document.getElementById(id).addEventListener('change', syncConfirmEnabled);
+  });
+
+  document.getElementById('btnConfirm').addEventListener('click', async function () {
+    if (pendingNovelId == null) return;
+    const body = {
+      confirmTitle: document.getElementById('fTitle').value.trim(),
+      typedPhrase: document.getElementById('fPhrase').value.trim(),
+      acknowledgeIrreversible: document.getElementById('fAck').checked
+    };
+    try {
+      const res = await fetchJson(apiBase + '/api/novel/' + pendingNovelId + '/delete', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      const ok = res && (res.status === 'success' || res.code === 'OK');
+      if (!ok) {
+        showToast((res && res.message) || '删除失败', true);
+        return;
+      }
+      showToast(res.message || '已删除', false);
+      closeModal();
+      loadList();
+    } catch (e) {
+      showToast(e.message, true);
+    }
+  });
+
+  refreshSession().then(function () { return Promise.all([loadFrontendRuntime(), loadList()]); });
+})();
+</script>
+</body>
+</html>

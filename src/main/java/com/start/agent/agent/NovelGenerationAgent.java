@@ -1,10 +1,28 @@
 package com.start.agent.agent;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.model.WritingStyleHints;
+import com.start.agent.narrative.NarrativeCriticReport;
+import com.start.agent.narrative.NarrativeEngineArtifactSink;
+import com.start.agent.narrative.NarrativeLint;
+import com.start.agent.narrative.NarrativeLintReport;
+import com.start.agent.narrative.NarrativePhysicsMode;
+import com.start.agent.narrative.NarrativeProfile;
+import com.start.agent.narrative.NarrativeProfileResolver;
+import com.start.agent.narrative.OutlineCharacterExcerpt;
 import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * 小说章节生成编排：串联初稿、一致性审查、内容审核、润色、终稿去 AI 味；并按 {@link WritingPipeline}、热梗开关拼接提示词。
@@ -13,70 +31,507 @@ import org.springframework.stereotype.Component;
 @Component
 public class NovelGenerationAgent {
 
+    private static final int LN_PLAN_OUTLINE_CLIP = 10_000;
+    private static final int LN_PLAN_PROFILE_CLIP = 3_500;
+    private static final int LN_PLAN_PREV_CLIP = 6_000;
+    private static final int LN_PLAN_IMMUTABLE_CLIP = 2_500;
+    private static final int NE_PLAN_OUTLINE_CLIP = 9_000;
+    private static final int NE_PLAN_PROFILE_CLIP = 3_200;
+    private static final int NE_PLAN_PREV_CLIP = 5_500;
+    private static final int NE_PLAN_IMMUTABLE_CLIP = 2_400;
+
     private final ChatClient chatClient;
     private final ContentReviewAgent reviewAgent;
     private final PolishingAgent polishingAgent;
     private final ConsistencyReviewAgent consistencyAgent;
+    private final ObjectMapper objectMapper;
+    private final NarrativeProfileResolver narrativeProfileResolver;
+
+    /** 轻小说章前节拍规划（多一次模型调用）；可通过配置关闭。 */
+    @Value("${novel.light-novel.chapter-planning-enabled:true}")
+    private boolean lightNovelChapterPlanningEnabled;
+
+    /** 叙事引擎 1.0：章节情绪带宽与语言力学约束（初稿/润色/终稿注入）。 */
+    @Value("${novel.narrative-engine.enabled:true}")
+    private boolean narrativeEngineEnabled;
+
+    /** M2：章前叙事 Planner（多一次模型调用）；失败或非适用管线时静默跳过。 */
+    @Value("${novel.narrative-engine.two-phase-enabled:false}")
+    private boolean narrativeTwoPhaseEnabled;
+
+    /**
+     * 轻小说已启用「章拍规划」时默认跳过叙事 Planner，避免两套节拍冲突（可配置关闭该跳过）。
+     */
+    @Value("${novel.narrative-engine.two-phase-skip-with-light-novel-plan:true}")
+    private boolean narrativeTwoPhaseSkipWithLightNovelPlan;
+
+    @Value("${novel.narrative-engine.planner-temperature:0.35}")
+    private double narrativePlannerTemperature;
+
+    @Value("${novel.narrative-engine.planner-max-tokens:900}")
+    private int narrativePlannerMaxTokens;
+
+    /** M3：终稿后 Lint；命中时可窄幅修订（多一次模型调用）。 */
+    @Value("${novel.narrative-engine.lint-enabled:true}")
+    private boolean narrativeLintEnabled;
+
+    @Value("${novel.narrative-engine.lint-fix-enabled:true}")
+    private boolean narrativeLintFixEnabled;
+
+    @Value("${novel.narrative-engine.lint-fix-temperature:0.35}")
+    private double narrativeLintFixTemperature;
+
+    @Value("${novel.narrative-engine.lint-fix-max-tokens:4096}")
+    private int narrativeLintFixMaxTokens;
+
+    /** M4：跨章叙事承接（书本级持久化摘要注入初稿）；关闭则不拼接承接块。 */
+    @Value("${novel.narrative-engine.m4-carryover-enabled:true}")
+    private boolean narrativeM4CarryoverEnabled;
+
+    /** M8：叙事批评 pass（默认关闭，多一次模型调用）。 */
+    @Value("${novel.narrative-engine.m8-critic-enabled:false}")
+    private boolean narrativeM8CriticEnabled;
+
+    /** M8：在批评命中且达到最低严重度时做一轮窄幅重写（默认关闭）。 */
+    @Value("${novel.narrative-engine.m8-rewrite-enabled:false}")
+    private boolean narrativeM8RewriteEnabled;
+
+    @Value("${novel.narrative-engine.m8-critic-temperature:0.25}")
+    private double narrativeM8CriticTemperature;
+
+    @Value("${novel.narrative-engine.m8-critic-max-tokens:1500}")
+    private int narrativeM8CriticMaxTokens;
+
+    @Value("${novel.narrative-engine.m8-rewrite-temperature:0.35}")
+    private double narrativeM8RewriteTemperature;
+
+    @Value("${novel.narrative-engine.m8-rewrite-max-tokens:4096}")
+    private int narrativeM8RewriteMaxTokens;
+
+    /** 触发窄幅重写所需的最低严重度：low / medium / high（大小写不敏感，可用 低/中/高）。 */
+    @Value("${novel.narrative-engine.m8-rewrite-min-severity:medium}")
+    private String narrativeM8RewriteMinSeverity;
+
+    /** 叙事阻力层：Planner 阻力字段 + 初稿默认摩擦（防全程最优解）。 */
+    @Value("${novel.narrative-engine.resistance-layer-enabled:true}")
+    private boolean narrativeResistanceLayerEnabled;
+
+    /** 流体润滑：终稿去 AI 味之后、Lint 之前多一次窄幅体验层修订。 */
+    @Value("${novel.narrative-engine.flow-pass-enabled:true}")
+    private boolean narrativeFlowPassEnabled;
+
+    @Value("${novel.narrative-engine.flow-pass-temperature:0.35}")
+    private double narrativeFlowPassTemperature;
+
+    @Value("${novel.narrative-engine.flow-pass-max-tokens:4096}")
+    private int narrativeFlowPassMaxTokens;
+
+    /** 大纲：开篇须逐章细纲覆盖的最少章数。 */
+    @Value("${novel.outline.detailed-prefix-chapters:40}")
+    private int outlineDetailedPrefixChapters;
+
+    /** 大纲：全书路线图须覆盖到的最少末章号。 */
+    @Value("${novel.outline.min-roadmap-chapters:120}")
+    private int outlineMinRoadmapChapters;
+
+    /** 两阶段大纲：先产出冲突图谱 JSON，再生成 Markdown（效果最好；失败自动退回单阶段）。 */
+    @Value("${novel.outline.two-phase-graph-enabled:true}")
+    private boolean outlineTwoPhaseGraphEnabled;
+
+    @Value("${novel.outline.graph-phase-temperature:0.35}")
+    private double outlineGraphPhaseTemperature;
+
+    @Value("${novel.outline.graph-phase-max-tokens:3600}")
+    private int outlineGraphPhaseMaxTokens;
+
+    /** 角色生成：从大纲 Markdown 摘取角色相关段落的上限字符。 */
+    @Value("${novel.outline.character-excerpt-max-chars:14000}")
+    private int outlineCharacterExcerptMaxChars;
 
     public NovelGenerationAgent(
             ChatClient.Builder chatClientBuilder,
             ContentReviewAgent reviewAgent,
             PolishingAgent polishingAgent,
-            ConsistencyReviewAgent consistencyAgent) {
+            ConsistencyReviewAgent consistencyAgent,
+            ObjectMapper objectMapper,
+            NarrativeProfileResolver narrativeProfileResolver) {
         this.chatClient = chatClientBuilder.build();
         this.reviewAgent = reviewAgent;
         this.polishingAgent = polishingAgent;
         this.consistencyAgent = consistencyAgent;
+        this.objectMapper = objectMapper;
+        this.narrativeProfileResolver = narrativeProfileResolver;
         log.info("【AI代理初始化】NovelGenerationAgent 已就绪（生态型AI - 因果驱动版）");
     }
 
     public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline) {
-        return generateOutline(topic, generationSetting, pipeline, false);
+        return generateOutline(topic, generationSetting, pipeline, false, null);
     }
 
     public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled) {
-        log.info("【🤖 AI调用】开始生成故事大纲 - 题材: {}, 设定长度: {}, hotMeme={}", topic, textLength(generationSetting), hotMemeEnabled);
+        return generateOutline(topic, generationSetting, pipeline, hotMemeEnabled, null);
+    }
+
+    public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                  WritingStyleHints styleHints) {
+        return generateOutline(topic, generationSetting, pipeline, hotMemeEnabled, styleHints, null, null, null);
+    }
+
+    /**
+     * @param outlineDetailedOverride 非 null 时覆盖配置 {@code novel.outline.detailed-prefix-chapters}
+     * @param outlineMinRoadmapOverride 非 null 时覆盖配置 {@code novel.outline.min-roadmap-chapters}
+     * @param regenerationHint 非空时注入「作者/编辑补充说明」区块（重新生成大纲时使用；勿含未经转义的 {@code %} 序列以免干扰模板）
+     */
+    public String generateOutline(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                  WritingStyleHints styleHints, Integer outlineDetailedOverride, Integer outlineMinRoadmapOverride,
+                                  String regenerationHint) {
+        return generateOutlineResult(topic, generationSetting, pipeline, hotMemeEnabled, styleHints,
+                outlineDetailedOverride, outlineMinRoadmapOverride, regenerationHint).markdown();
+    }
+
+    /**
+     * 生成大纲：可选两阶段（冲突图谱 JSON → Markdown）；图谱见 {@link OutlineGenerationResult#outlineGraphJson()}。
+     */
+    public OutlineGenerationResult generateOutlineResult(String topic, String generationSetting, WritingPipeline pipeline,
+                                                         boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                                         Integer outlineDetailedOverride, Integer outlineMinRoadmapOverride,
+                                                         String regenerationHint) {
+        log.info("【🤖 AI调用】开始生成故事大纲 - 题材: {}, 设定长度: {}, hotMeme={}, regenerateHint={}, twoPhaseGraph={}",
+                topic, textLength(generationSetting), hotMemeEnabled,
+                regenerationHint != null && !regenerationHint.isBlank(), outlineTwoPhaseGraphEnabled);
         long startTime = System.currentTimeMillis();
+        int dp = outlineDetailedOverride != null ? outlineDetailedOverride : outlineDetailedPrefixChapters;
+        int mr = outlineMinRoadmapOverride != null ? outlineMinRoadmapOverride : outlineMinRoadmapChapters;
+        int[] clamped = clampOutlinePlanParams(dp, mr);
+        dp = clamped[0];
+        mr = clamped[1];
+
+        String graphPretty = null;
+        if (outlineTwoPhaseGraphEnabled) {
+            graphPretty = tryGenerateConflictGraphJson(topic, generationSetting, pipeline, hotMemeEnabled, styleHints);
+            if (graphPretty != null) {
+                log.info("【大纲图谱】第一阶段成功，进入 Markdown 大纲第二阶段");
+            }
+        }
+
+        String authorHintBlock = "";
+        if (regenerationHint != null && !regenerationHint.isBlank()) {
+            authorHintBlock = """
+
+                    【作者/编辑补充说明（本次大纲须优先落实；若与全书硬性节奏结构冲突，在不颠覆长篇分期前提下尽量靠拢）】
+                    """ + regenerationHint.trim();
+        }
+
         String settingBlock = buildSettingBlock(generationSetting);
         String outlineCraft = NarrativeCraftPrompts.outlineAntiTropeBlock()
-                + "\n" + NarrativeCraftPrompts.outlineReaderAppealBlock();
+                + "\n" + NarrativeCraftPrompts.outlineReaderAppealBlock()
+                + "\n" + NarrativeCraftPrompts.outlineNarrativeKernelBlock(pipeline);
         if (isShuangwenPipeline(pipeline)) {
             outlineCraft = outlineCraft + "\n" + NarrativeCraftPrompts.outlineShuangwenUniversalBlock();
+        } else {
+            String outlinePipe = NarrativeCraftPrompts.outlinePipelineCraftBlock(pipeline);
+            if (!outlinePipe.isBlank()) {
+                outlineCraft = outlineCraft + "\n" + outlinePipe;
+            }
         }
         if (hotMemeEnabled) {
             outlineCraft = outlineCraft + "\n" + NarrativeCraftPrompts.hotMemeOutlineBlock();
         }
+        String micro = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+        if (!micro.isBlank()) {
+            outlineCraft = outlineCraft + "\n" + micro;
+        }
 
-        String prompt = String.format("""
-            你是一位极具创意的全能型作家，擅长各种类型的小说创作。
+        String longFormBlock = NarrativeCraftPrompts.outlineLongFormRoadmapBlock(dp, mr);
 
-            请根据题材"%s"创作一个新颖独特、符合题材特色的故事大纲。
+        String head = String.format("""
+                你是一位极具创意的全能型作家，擅长各种类型的小说创作。
 
-            %s
+                请根据题材"%s"创作一个新颖独特、符合题材特色的故事大纲。
 
-            【核心要求】
-            1. 理解题材特性，不要把所有题材都写成传统玄幻/修仙。
-            2. 根据题材构建世界观、主角身份、核心矛盾、力量体系或特殊机制。
-            3. 人物要立体真实，配角有独立目标，对立角色要有合理理念。
-            4. 至少规划15个章节的核心剧情，每章包含核心事件、冲突、情感/爽点、伏笔和节奏。
-            5. 使用第三人称叙述，严禁第一人称。
-            6. 必须优先遵守用户提供的设定，不能与设定冲突；设定不足处再自由发挥。
+                %s
+                """, topic, settingBlock);
 
-            %s
+        String graphConsistencyLine = graphPretty != null
+                ? "- **冲突结构概要**须与上文「已定稿 JSON」语义一致（可用叙述复述，不得引入矛盾的核心对立、张力矩阵与拐点逻辑）。\n"
+                : "";
+        String castConsistencyLine = graphPretty != null
+                ? "6. **角色姓名**：必须与上文已定稿 JSON 中 cast 数组的 name 字段逐字一致；只可补充外貌与动机细节，禁止改名或另起一套核心姓名。\n"
+                : "";
 
-            【文风流水线】
-            %s
+        String tail = String.format("""
 
-            【输出格式】
-            - 世界观设定
-            - 主角设定
-            - 主要角色
-            - 对立角色
-            - 剧情规划
-            - 写作风格要求
-            """, topic, settingBlock, outlineCraft, styleGuide(pipeline));
+                %s
 
-        return callAi(prompt, startTime, "大纲生成");
+                【核心要求】
+                1. 理解题材特性，不要把所有题材都写成传统玄幻/修仙。
+                2. 根据题材构建世界观、主角身份、核心矛盾、力量体系或特殊机制。
+                3. 人物要立体真实，配角有独立目标，对立角色要有合理理念。
+                4. 使用第三人称叙述，严禁第一人称。
+                5. 必须优先遵守用户提供的设定，不能与设定冲突；设定不足处再自由发挥。
+                %s
+
+                %s
+
+                【文风流水线】
+                %s
+
+                【输出格式】
+                - 世界观设定
+                - 主角设定
+                - 主要角色（每人除表层外，尽量点明 **want / fear** 与一处 **内在矛盾**——欲求与行为的张力；对立角色写清「进场会搅乱什么」）
+                - 对立角色
+                - **冲突结构概要**（放在「剧情规划」之前；篇幅精炼，总宜 ≤ 400 字）
+                  %s
+                  - **引擎定性**一句话（须与上文「叙事内核」一致：如冲突升级型 / 关系漂移型 / 日常摩擦型 / 制度压抑型）
+                  - **欲望与约束**：主角核心欲求一行；世界或规则的核心约束一行
+                  - **三类张力**：外部压力、内心缺口或恐惧、关键关系张力 —— 各至少一条
+                  - **人物张力矩阵**：至少三组「角色甲 ↔ 角色乙：关系定性」（称谓须与已定稿 JSON.cast[].name 一致）
+                  - **全书张力走向**：4～8 个关键词或极短句（标注如何与长篇各阶段对齐）
+                - 剧情规划（须严格遵守上文「长篇连载节奏」：(A)开篇细纲 +(B)后续路线图 +(C)全书宏观阶段与里程碑锚点；细纲每句遵守「章节推进纪律」括号标注）
+                - 写作风格要求
+                """, longFormBlock, castConsistencyLine, outlineCraft, styleGuide(pipeline), graphConsistencyLine);
+
+        String graphAnchor = NarrativeCraftPrompts.outlineAnchoredGraphBlock(graphPretty != null ? graphPretty : "");
+        String prompt = head + authorHintBlock + graphAnchor + tail;
+
+        String markdown = callAi(prompt, startTime, "大纲生成");
+        return new OutlineGenerationResult(markdown, graphPretty);
+    }
+
+    /** 第一阶段：冲突图谱 JSON；失败返回 null（上层退回单阶段大纲）。 */
+    private String tryGenerateConflictGraphJson(String topic, String generationSetting, WritingPipeline pipeline,
+                                               boolean hotMemeEnabled, WritingStyleHints styleHints) {
+        long t0 = System.currentTimeMillis();
+        String settingBlock = buildSettingBlock(generationSetting);
+        String p1 = NarrativeCraftPrompts.outlineConflictGraphPhasePrompt(pipeline, topic, settingBlock, hotMemeEnabled);
+        String micro = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+        if (!micro.isBlank()) {
+            p1 = p1 + "\n\n" + micro;
+        }
+        String raw = callAiOutlineGraph(p1, t0);
+        JsonNode root = parseOutlineGraphJson(raw);
+        if (root == null) {
+            return null;
+        }
+        normalizeConflictGraph(root, pipeline);
+        if (!validateConflictGraph(root)) {
+            log.warn("【大纲图谱】JSON 结构校验未通过，退回单阶段大纲");
+            return null;
+        }
+        try {
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+        } catch (Exception e) {
+            log.warn("【大纲图谱】格式化失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void normalizeConflictGraph(JsonNode root, WritingPipeline pipeline) {
+        if (!(root instanceof ObjectNode on)) {
+            return;
+        }
+        JsonNode altChars = on.path("characters");
+        JsonNode castNode = on.path("cast");
+        if ((!castNode.isArray() || castNode.size() == 0) && altChars.isArray() && altChars.size() > 0) {
+            on.set("cast", altChars);
+            on.remove("characters");
+        }
+        on.put("schemaVersion", root.path("schemaVersion").asInt(1));
+        on.put("engine", NarrativeCraftPrompts.outlineEngineTokenForPipeline(pipeline));
+    }
+
+    private boolean validateConflictGraph(JsonNode root) {
+        if (root == null || !root.isObject()) {
+            return false;
+        }
+        JsonNode setup = root.path("setup");
+        if (!setup.path("desire").isTextual() || setup.path("desire").asText().isBlank()) {
+            return false;
+        }
+        if (!setup.path("constraint").isTextual() || setup.path("constraint").asText().isBlank()) {
+            return false;
+        }
+        JsonNode conflicts = root.path("conflicts");
+        if (!conflicts.isArray() || conflicts.size() < 3) {
+            return false;
+        }
+        boolean ext = false, internal = false, rel = false;
+        for (JsonNode c : conflicts) {
+            String type = c.path("type").asText("").toLowerCase(Locale.ROOT);
+            if (type.contains("external")) {
+                ext = true;
+            }
+            if (type.contains("internal")) {
+                internal = true;
+            }
+            if (type.contains("relationship")) {
+                rel = true;
+            }
+            if (!c.path("force").isTextual() || c.path("force").asText().isBlank()) {
+                return false;
+            }
+        }
+        if (!ext || !internal || !rel) {
+            return false;
+        }
+        JsonNode tm = root.path("tension_matrix");
+        if (!tm.isArray() || tm.size() < 3) {
+            return false;
+        }
+        for (JsonNode e : tm) {
+            if (!e.path("from").isTextual() || e.path("from").asText().isBlank()) {
+                return false;
+            }
+            if (!e.path("to").isTextual() || e.path("to").asText().isBlank()) {
+                return false;
+            }
+            if (!e.path("relation").isTextual() || e.path("relation").asText().isBlank()) {
+                return false;
+            }
+        }
+        JsonNode tp = root.path("turning_points");
+        if (!tp.isArray() || tp.size() < 3) {
+            return false;
+        }
+        for (JsonNode e : tp) {
+            if (!e.path("label").isTextual() || e.path("label").asText().isBlank()) {
+                return false;
+            }
+            if (!e.path("flip").isTextual() || e.path("flip").asText().isBlank()) {
+                return false;
+            }
+        }
+        JsonNode kw = root.path("escalation_keywords");
+        if (!kw.isArray() || kw.size() < 6) {
+            return false;
+        }
+        int nonEmptyKw = 0;
+        for (JsonNode k : kw) {
+            if (k.isTextual() && !k.asText().isBlank()) {
+                nonEmptyKw++;
+            }
+        }
+        if (nonEmptyKw < 6) {
+            return false;
+        }
+        JsonNode branches = root.path("possible_branch_hints");
+        if (!branches.isArray() || branches.size() < 2) {
+            return false;
+        }
+        for (JsonNode b : branches) {
+            if (!b.path("node").isTextual() || b.path("node").asText().isBlank()) {
+                return false;
+            }
+            JsonNode out = b.path("outcomes");
+            if (!out.isArray() || out.size() < 2) {
+                return false;
+            }
+        }
+        return validateOutlineCast(root);
+    }
+
+    /**
+     * 两阶段大纲图谱中的结构化角色表 {@code cast}（可与 Markdown 大纲、角色档案生成对齐）。
+     */
+    private boolean validateOutlineCast(JsonNode root) {
+        JsonNode cast = root.path("cast");
+        if (!cast.isArray() || cast.size() < 4) {
+            log.warn("【大纲图谱】cast 数组缺失或人数不足（须≥4）");
+            return false;
+        }
+        boolean hasProtagonist = false;
+        boolean hasAntagonist = false;
+        java.util.HashSet<String> names = new java.util.HashSet<>();
+        for (JsonNode c : cast) {
+            if (c == null || !c.isObject()) {
+                return false;
+            }
+            String name = c.path("name").asText("").trim();
+            if (name.isEmpty() || name.length() > 80) {
+                log.warn("【大纲图谱】cast 项 name 无效");
+                return false;
+            }
+            if (!names.add(name)) {
+                log.warn("【大纲图谱】cast 姓名重复: {}", name);
+                return false;
+            }
+            if (c.path("want").asText("").trim().isEmpty()
+                    || c.path("fear").asText("").trim().isEmpty()
+                    || c.path("summary").asText("").trim().isEmpty()) {
+                log.warn("【大纲图谱】cast 项缺少 want/fear/summary");
+                return false;
+            }
+            if (!c.has("knowledge")) {
+                log.warn("【大纲图谱】cast 项缺少 knowledge 键");
+                return false;
+            }
+            String role = c.path("role").asText("").trim().toLowerCase(Locale.ROOT);
+            if (roleContainsProtagonist(role)) {
+                hasProtagonist = true;
+            }
+            if (roleContainsAntagonist(role)) {
+                hasAntagonist = true;
+            }
+        }
+        if (!hasProtagonist || !hasAntagonist) {
+            log.warn("【大纲图谱】cast 须同时含主角位与对立位角色");
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean roleContainsProtagonist(String roleLower) {
+        return roleLower.contains("protagonist") || roleLower.contains("主角");
+    }
+
+    private static boolean roleContainsAntagonist(String roleLower) {
+        return roleLower.contains("antagonist")
+                || roleLower.contains("反派")
+                || roleLower.contains("对立")
+                || roleLower.contains("对手");
+    }
+
+    private JsonNode parseOutlineGraphJson(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            String cleaned = raw.trim();
+            if (cleaned.startsWith("```")) {
+                int firstNl = cleaned.indexOf('\n');
+                if (firstNl > 0) {
+                    cleaned = cleaned.substring(firstNl + 1);
+                }
+                int fence = cleaned.lastIndexOf("```");
+                if (fence >= 0) {
+                    cleaned = cleaned.substring(0, fence);
+                }
+                cleaned = cleaned.trim();
+            }
+            return objectMapper.readTree(cleaned);
+        } catch (Exception e) {
+            log.warn("【大纲图谱】JSON 解析失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String callAiOutlineGraph(String prompt, long startTime) {
+        log.debug("【大纲图谱】提示词长度: {} 字符", prompt.length());
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(Math.max(0, Math.min(2, outlineGraphPhaseTemperature)))
+                .maxTokens(Math.max(512, Math.min(8192, outlineGraphPhaseMaxTokens)))
+                .build();
+        try {
+            String result = chatClient.prompt(prompt).options(opts).call().content();
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.info("【大纲图谱】✅ 第一阶段完成 - 耗时: {}ms, 长度: {}", elapsed, result == null ? 0 : result.length());
+            return result == null ? "" : result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.warn("【大纲图谱】❌ 第一阶段失败 - 耗时: {}ms, {}", elapsed, e.getMessage());
+            return "";
+        }
     }
 
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
@@ -84,19 +539,81 @@ public class NovelGenerationAgent {
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, false);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, false, null, null, null, null, null);
     }
 
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
                                   String characterProfile, String previousChaptersSummary,
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline, boolean hotMemeEnabled) {
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, null, null, null, null, null);
+    }
+
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints) {
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, null, null, null, null);
+    }
+
+    /**
+     * @param narrativeProfile 可为 null：未开启叙事引擎或未解析时，将仅在开启引擎时用 resolver+管线回退默认（由调用方传入更佳）。
+     */
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                  NarrativeProfile narrativeProfile) {
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, null, null);
+    }
+
+    /**
+     * @param narrativeCarryover M4：书本级承接摘要；可为 null。
+     */
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                  NarrativeProfile narrativeProfile, String narrativeCarryover) {
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, narrativeCarryover, null);
+    }
+
+    /**
+     * @param narrativePhysicsMode M6：可为 null 时按管线默认 {@link NarrativePhysicsMode#fromPipeline}。
+     */
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                  NarrativeProfile narrativeProfile, NarrativePhysicsMode narrativePhysicsMode,
+                                  String narrativeCarryover) {
+        return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, narrativePhysicsMode, narrativeCarryover, null);
+    }
+
+    /**
+     * @param artifactSink M7：可为 null；非 null 时写入 Planner/Lint 快照供落库。
+     */
+    public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
+                                  String characterProfile, String previousChaptersSummary,
+                                  String novelSetting, String chapterSetting, String immutableConstraints,
+                                  WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
+                                  NarrativeProfile narrativeProfile, NarrativePhysicsMode narrativePhysicsMode,
+                                  String narrativeCarryover, NarrativeEngineArtifactSink artifactSink) {
         log.info("【📝 生态型AI】开始第{}章创作（因果驱动模式），hotMeme={}", chapterNumber, hotMemeEnabled);
         long totalStartTime = System.currentTimeMillis();
+        NarrativeProfile effectiveProfile = resolveNarrativeProfile(pipeline, narrativeProfile);
+        NarrativePhysicsMode effectivePhysics = narrativePhysicsMode != null
+                ? narrativePhysicsMode
+                : NarrativePhysicsMode.fromPipeline(pipeline);
 
         try {
             log.info("【步骤1/5】调用创作Agent生成初稿...");
-            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled);
+            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics, narrativeCarryover, artifactSink);
             log.info("【步骤1/5】✅ 初稿生成成功，长度: {} 字符", draft.length());
 
             log.info("【步骤2/5】调用一致性审查Agent...");
@@ -104,10 +621,13 @@ public class NovelGenerationAgent {
             String consistencyExtraShuang = isShuangwenPipeline(pipeline)
                     ? NarrativeCraftPrompts.consistencyReviewShuangwenUniversalBlock()
                     : "";
+            String consistencyExtraPipe = isShuangwenPipeline(pipeline)
+                    ? ""
+                    : NarrativeCraftPrompts.consistencyReviewPipelineBlock(pipeline);
             String consistencyExtraMeme = hotMemeEnabled
                     ? NarrativeCraftPrompts.consistencyHotMemeReviewBlock()
                     : "";
-            final String consistencyExtra = consistencyExtraShuang + consistencyExtraMeme;
+            final String consistencyExtra = consistencyExtraShuang + consistencyExtraPipe + consistencyExtraMeme;
             String consistentContent = safeStep(
                     "一致性审查",
                     () -> consistencyAgent.reviewConsistency(draft, outline, consistencyProfile, chapterNumber, previousChaptersSummary, consistencyExtra),
@@ -124,7 +644,14 @@ public class NovelGenerationAgent {
             if (hotMemeEnabled) {
                 polishingOutline = polishingOutline + NarrativeCraftPrompts.hotMemePolishHintBlock();
             }
-            String polishingOutlineFinal = polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline);
+            String microPolish = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+            if (!microPolish.isBlank()) {
+                polishingOutline = polishingOutline + "\n\n" + microPolish;
+            }
+            final String polishingOutlineFinal = polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline)
+                    + (narrativeEngineEnabled && effectiveProfile != null
+                    ? NarrativeCraftPrompts.narrativeEnginePolishReminder(effectiveProfile, pipeline, effectivePhysics)
+                    : "");
             String polishedContent = safeStep(
                     "文笔润色",
                     () -> polishingAgent.polish(reviewedContent, polishingOutlineFinal, chapterNumber, pipeline),
@@ -134,12 +661,16 @@ public class NovelGenerationAgent {
 
             log.info("【步骤5/5】进行最终内容审核...");
             String reviewedFinalContent = safeStep("最终审核", () -> reviewAgent.reviewAndFix(polishedContent), polishedContent);
-            String finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline, hotMemeEnabled), reviewedFinalContent);
+            String finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics), reviewedFinalContent);
             log.info("【步骤5/5】✅ 最终审核完成，长度: {} 字符", finalContent.length());
+
+            String afterFlow = applyNarrativeFlowPass(finalContent, chapterNumber, pipeline);
+            String afterLint = applyNarrativeLintPass(afterFlow, chapterNumber, pipeline, effectiveProfile, artifactSink);
+            String delivered = applyNarrativeM8Pass(outline, afterLint, chapterNumber, pipeline, effectiveProfile, artifactSink);
 
             long totalElapsed = System.currentTimeMillis() - totalStartTime;
             log.info("【🎉 创作完成】第{}章创作流程结束，总耗时: {}ms", chapterNumber, totalElapsed);
-            return finalContent;
+            return delivered;
         } catch (Exception e) {
             long totalElapsed = System.currentTimeMillis() - totalStartTime;
             log.error("【❌ 创作失败】第{}章创作异常 - 耗时: {}ms", chapterNumber, totalElapsed, e);
@@ -147,19 +678,264 @@ public class NovelGenerationAgent {
         }
     }
 
+    private NarrativeProfile resolveNarrativeProfile(WritingPipeline pipeline, NarrativeProfile narrativeProfile) {
+        if (!narrativeEngineEnabled) {
+            return null;
+        }
+        if (narrativeProfile != null) {
+            return narrativeProfile;
+        }
+        return narrativeProfileResolver.resolve(pipeline, null);
+    }
+
+    private String applyNarrativeLintPass(String content, int chapterNumber, WritingPipeline pipeline, NarrativeProfile profile,
+                                          NarrativeEngineArtifactSink artifactSink) {
+        if (content == null) {
+            return null;
+        }
+        if (!narrativeEngineEnabled || profile == null) {
+            if (artifactSink != null) {
+                artifactSink.recordLintSkipped("narrative_engine_or_profile_off");
+            }
+            return content;
+        }
+        NarrativeLintReport report = NarrativeLint.lint(content, profile);
+        if (!narrativeLintEnabled) {
+            if (artifactSink != null) {
+                artifactSink.recordLintScan(report, false, false, false);
+            }
+            return content;
+        }
+        if (!report.hasIssues()) {
+            log.debug("【叙事Lint】第{}章 {}", chapterNumber, report.summary());
+            if (artifactSink != null) {
+                artifactSink.recordLintScan(report, true, false, false);
+            }
+            return content;
+        }
+        log.warn("【叙事Lint】第{}章 hits={} detail={}", chapterNumber, report.issues().size(), report.summary());
+        if (!narrativeLintFixEnabled) {
+            if (artifactSink != null) {
+                artifactSink.recordLintScan(report, true, false, false);
+            }
+            return content;
+        }
+        String before = content;
+        String fixed = safeStep(
+                "叙事Lint窄幅修正",
+                () -> polishingAgent.polishNarrativeLintPass(content, chapterNumber, pipeline, profile, report,
+                        narrativeLintFixTemperature, narrativeLintFixMaxTokens),
+                content
+        );
+        if (artifactSink != null) {
+            artifactSink.recordLintScan(report, true, true, fixed != null && !fixed.equals(before));
+        }
+        return fixed;
+    }
+
+    /** 去 AI 味之后、Lint 之前：窄幅流体润滑（不改剧情）。 */
+    private String applyNarrativeFlowPass(String content, int chapterNumber, WritingPipeline pipeline) {
+        if (content == null || !narrativeFlowPassEnabled) {
+            return content;
+        }
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        return safeStep(
+                "叙事流体润滑",
+                () -> polishingAgent.polishNarrativeFlowPass(content, chapterNumber, p,
+                        narrativeFlowPassTemperature, narrativeFlowPassMaxTokens),
+                content
+        );
+    }
+
+    private static int m8MinSeverityOrdinal(String raw) {
+        String s = (raw == null ? "" : raw).trim().toLowerCase(Locale.ROOT);
+        if (s.equals("high") || s.equals("h") || s.contains("高")) {
+            return 2;
+        }
+        if (s.equals("medium") || s.equals("med") || s.equals("m") || s.contains("中")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * M8：叙事批评 → 可选一轮窄幅重写；失败或解析失败时保留正文。
+     */
+    private String applyNarrativeM8Pass(String outline, String content, int chapterNumber, WritingPipeline pipeline,
+                                       NarrativeProfile profile, NarrativeEngineArtifactSink artifactSink) {
+        if (content == null) {
+            return null;
+        }
+        if (!narrativeEngineEnabled || profile == null) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticSkipped("narrative_engine_or_profile_off");
+            }
+            return content;
+        }
+        if (!narrativeM8CriticEnabled) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticSkipped("m8_critic_disabled");
+            }
+            return content;
+        }
+
+        String raw = safeStep("叙事批评", () -> polishingAgent.callNarrativeCritic(
+                content,
+                outline,
+                chapterNumber,
+                pipeline,
+                profile,
+                narrativeM8CriticTemperature,
+                narrativeM8CriticMaxTokens), "");
+        if (raw.isBlank()) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticError("empty_or_failed_response", null);
+            }
+            return content;
+        }
+
+        NarrativeCriticReport report = NarrativeCriticReport.tryParse(objectMapper, raw);
+        if (report == null) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticError("parse_failed", raw);
+            }
+            return content;
+        }
+
+        if (!report.hasIssues()) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticClean(raw);
+            }
+            return content;
+        }
+
+        if (artifactSink != null) {
+            artifactSink.recordCriticHits(report, raw);
+        }
+
+        int minOrd = m8MinSeverityOrdinal(narrativeM8RewriteMinSeverity);
+        boolean wantRewrite = narrativeM8RewriteEnabled && report.hasIssueAtLeast(minOrd);
+        if (!wantRewrite) {
+            if (artifactSink != null) {
+                artifactSink.recordCriticRewrite(false, false);
+            }
+            return content;
+        }
+
+        String before = content;
+        String fixed = safeStep(
+                "叙事批评窄幅重写",
+                () -> polishingAgent.polishNarrativeCriticPass(before, chapterNumber, pipeline, profile, report,
+                        narrativeM8RewriteTemperature, narrativeM8RewriteMaxTokens),
+                before
+        );
+        if (artifactSink != null) {
+            artifactSink.recordCriticRewrite(true, fixed != null && !fixed.equals(before));
+        }
+        return fixed;
+    }
+
     private String generateDraft(String outline, int chapterNumber, String previousContent, String nextContent,
                                  String characterProfile, String novelSetting, String chapterSetting,
-                                 String immutableConstraints, WritingPipeline pipeline, boolean hotMemeEnabled) {
+                                 String immutableConstraints, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                 WritingStyleHints styleHints, NarrativeProfile narrativeProfile,
+                                 NarrativePhysicsMode narrativePhysicsMode, String narrativeCarryover,
+                                 NarrativeEngineArtifactSink artifactSink) {
         log.info("【🤖 创作Agent】开始生成第{}章初稿", chapterNumber);
         long startTime = System.currentTimeMillis();
-        String draftRules = NarrativeCraftPrompts.chapterDraftHardRules()
-                + "\n" + NarrativeCraftPrompts.chapterReaderEngagementBlock();
+        String draftRules = NarrativeCraftPrompts.chapterDraftHardRules(pipeline)
+                + "\n" + NarrativeCraftPrompts.chapterReaderEngagementBlock(pipeline);
         if (isShuangwenPipeline(pipeline)) {
             draftRules = draftRules + "\n" + NarrativeCraftPrompts.chapterDraftShuangwenUniversalBlock();
+        } else {
+            String draftPipe = NarrativeCraftPrompts.chapterDraftPipelineCraftBlock(pipeline);
+            if (!draftPipe.isBlank()) {
+                draftRules = draftRules + "\n" + draftPipe;
+            }
         }
         if (hotMemeEnabled) {
             draftRules = draftRules + "\n" + NarrativeCraftPrompts.hotMemeChapterDraftBlock();
         }
+        String microDraft = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+        if (!microDraft.isBlank()) {
+            draftRules = draftRules + "\n" + microDraft;
+        }
+        if (narrativeM4CarryoverEnabled && narrativeCarryover != null && !narrativeCarryover.isBlank()) {
+            String carryBlock = NarrativeCraftPrompts.narrativeCarryoverBlock(narrativeCarryover.trim());
+            if (!carryBlock.isBlank()) {
+                draftRules = draftRules + "\n" + carryBlock;
+            }
+        }
+
+        WritingPipeline draftPipeline = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        if (lightNovelChapterPlanningEnabled && draftPipeline == WritingPipeline.LIGHT_NOVEL) {
+            String planBlock = buildLightNovelChapterPlanBlock(
+                    chapterNumber, outline, previousContent, characterProfile,
+                    novelSetting, chapterSetting, immutableConstraints);
+            if (planBlock != null && !planBlock.isBlank()) {
+                draftRules = draftRules + "\n\n" + planBlock;
+            }
+        }
+
+        if (narrativeEngineEnabled && narrativeProfile != null) {
+            String ne = NarrativeCraftPrompts.narrativeEngineChapterBlock(narrativeProfile);
+            if (ne != null && !ne.isBlank()) {
+                draftRules = draftRules + "\n\n" + ne;
+            }
+            String m5 = NarrativeCraftPrompts.narrativeEngineM5ChapterHardBlock(draftPipeline, narrativeProfile);
+            if (m5 != null && !m5.isBlank()) {
+                draftRules = draftRules + "\n\n" + m5;
+            }
+            NarrativePhysicsMode physics = narrativePhysicsMode != null
+                    ? narrativePhysicsMode
+                    : NarrativePhysicsMode.fromPipeline(draftPipeline);
+            String m6 = NarrativeCraftPrompts.narrativeEngineM6PhysicsBlock(physics);
+            if (m6 != null && !m6.isBlank()) {
+                draftRules = draftRules + "\n\n" + m6;
+            }
+        }
+
+        boolean skipNarrativePlanner = !narrativeTwoPhaseEnabled || !narrativeEngineEnabled || narrativeProfile == null
+                || (narrativeTwoPhaseSkipWithLightNovelPlan
+                && draftPipeline == WritingPipeline.LIGHT_NOVEL
+                && lightNovelChapterPlanningEnabled);
+        if (skipNarrativePlanner) {
+            if (artifactSink != null) {
+                if (!narrativeTwoPhaseEnabled) {
+                    artifactSink.recordPlannerSkipped("two_phase_disabled");
+                } else if (!narrativeEngineEnabled) {
+                    artifactSink.recordPlannerSkipped("narrative_engine_disabled");
+                } else if (narrativeProfile == null) {
+                    artifactSink.recordPlannerSkipped("no_profile");
+                } else {
+                    artifactSink.recordPlannerSkipped("light_novel_planner_skipped");
+                }
+            }
+        } else {
+            String nePlan = buildNarrativeTwoPhasePlannerBlock(
+                    chapterNumber,
+                    draftPipeline,
+                    outline,
+                    previousContent,
+                    characterProfile,
+                    novelSetting,
+                    chapterSetting,
+                    immutableConstraints,
+                    narrativeProfile,
+                    artifactSink);
+            if (nePlan != null && !nePlan.isBlank()) {
+                draftRules = draftRules + "\n\n" + nePlan;
+            }
+        }
+
+        if (narrativeEngineEnabled && narrativeProfile != null && narrativeResistanceLayerEnabled
+                && (skipNarrativePlanner || draftRules.contains("【本章叙事脚本｜Planner（M2）｜须严格遵守】") == false)) {
+            draftRules = draftRules + "\n\n" + NarrativeCraftPrompts.narrativeResistanceSoftFallback(draftPipeline);
+        }
+
+        String previousSectionHeading = (draftPipeline == WritingPipeline.LIGHT_NOVEL && chapterNumber > 1)
+                ? "【上一章衔接材料（结构化摘要+尾声节选｜禁止整章复述扩写）】"
+                : "【上一章内容回顾】";
 
         String prompt = String.format("""
             你是一位精通网文节奏的顶级作家，采用"生态型AI"创作模式。
@@ -188,7 +964,7 @@ public class NovelGenerationAgent {
             【文风流水线】
             %s
 
-            【上一章内容回顾】
+            %s
             %s
 
             【下一章已存在内容（若为中间重生必须兼容）】
@@ -218,6 +994,7 @@ public class NovelGenerationAgent {
                 buildSettingBlock(novelSetting),
                 buildChapterSettingBlock(chapterSetting),
                 styleGuide(pipeline),
+                previousSectionHeading,
                 previousContent,
                 buildNextChapterBlock(nextContent),
                 chapterNumber);
@@ -226,64 +1003,130 @@ public class NovelGenerationAgent {
     }
 
     public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline) {
-        return generateCharacterProfile(topic, generationSetting, pipeline, false);
+        return generateCharacterProfile(topic, generationSetting, pipeline, false, null);
     }
 
     public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled) {
-        log.info("【🤖 AI调用】开始生成角色设定 - 题材: {}, 设定长度: {}, hotMeme={}", topic, textLength(generationSetting), hotMemeEnabled);
+        return generateCharacterProfile(topic, generationSetting, pipeline, hotMemeEnabled, null);
+    }
+
+    public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                           WritingStyleHints styleHints) {
+        return generateCharacterProfile(topic, generationSetting, pipeline, hotMemeEnabled, styleHints, null, null);
+    }
+
+    /**
+     * @param outlineMarkdown        已定稿大纲正文；非空时摘取角色相关段落并锚定姓名
+     * @param outlineGraphJson       冲突图谱 JSON；非空时摘录 setup/conflicts/tension_matrix
+     */
+    public String generateCharacterProfile(String topic, String generationSetting, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                           WritingStyleHints styleHints, String outlineMarkdown, String outlineGraphJson) {
+        log.info("【🤖 AI调用】开始生成角色设定 - 题材: {}, 设定长度: {}, hotMeme={}, anchoredOutline={}, anchoredGraph={}",
+                topic, textLength(generationSetting), hotMemeEnabled,
+                outlineMarkdown != null && !outlineMarkdown.isBlank(),
+                outlineGraphJson != null && !outlineGraphJson.isBlank());
         long startTime = System.currentTimeMillis();
-        String characterExtra = isShuangwenPipeline(pipeline)
-                ? NarrativeCraftPrompts.characterShuangwenUniversalBlock()
-                : "";
+        String characterExtra;
+        if (isShuangwenPipeline(pipeline)) {
+            characterExtra = NarrativeCraftPrompts.characterShuangwenUniversalBlock();
+        } else {
+            characterExtra = NarrativeCraftPrompts.characterPipelineCraftBlock(pipeline);
+        }
         if (hotMemeEnabled) {
             characterExtra = characterExtra.isEmpty()
                     ? NarrativeCraftPrompts.hotMemeCharacterProfileBlock()
                     : characterExtra + "\n" + NarrativeCraftPrompts.hotMemeCharacterProfileBlock();
         }
+        String microChar = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+        if (!microChar.isBlank()) {
+            characterExtra = characterExtra.isEmpty()
+                    ? microChar
+                    : characterExtra + "\n" + microChar;
+        }
 
-        String prompt = String.format("""
-            你是一位专业的角色设计师，擅长为各种题材创造立体丰满的角色。
+        String excerpt = OutlineCharacterExcerpt.extract(outlineMarkdown, outlineCharacterExcerptMaxChars);
+        String graphAnchor = buildGraphCharacterAnchorJson(outlineGraphJson);
+        String anchorBlock = NarrativeCraftPrompts.characterOutlineAnchorBlock(excerpt, graphAnchor);
 
-            请为题材"%s"创作符合题材特色、立体真实的角色档案。
+        // 勿用 String.format：题材/设定中可能含 "%"。
+        String prompt = """
+                你是一位专业的角色设计师，擅长为各种题材创造立体丰满的角色。
 
-            %s
+                请为题材"
+                """
+                + (topic == null ? "" : topic)
+                + """
+                "创作符合题材特色、立体真实的角色档案。
 
-            【要求】
-            1. 必须优先遵守用户设定，角色身份、性格、关系、世界观不能与用户设定冲突。
-            2. 主角要包含基本信息、外貌、性格、背景故事、特殊能力/身份/处境、行为模式、人际关系、内在矛盾。
-            3. 设计2-3个重要配角，每个配角包含目标、作用、互动张力和成长弧线。
-            4. 设计1-2个对立角色，包含理念、冲突点、个人魅力、原则和底线。
-            5. 给出角色互动关系图和叙述视角说明。
-            6. 使用第三人称叙述说明。
+                """
+                + buildSettingBlock(generationSetting)
+                + (anchorBlock.isBlank() ? "" : "\n" + anchorBlock)
+                + """
 
-            %s
+                【要求】
+                1. 必须优先遵守用户设定，角色身份、性格、关系、世界观不能与用户设定冲突。
+                2. 主角要包含基本信息、外貌、性格、背景故事、特殊能力/身份/处境、行为模式、人际关系、内在矛盾。
+                3. 设计2-3个重要配角，每个配角包含目标、作用、互动张力和成长弧线。
+                4. 设计1-2个对立角色，包含理念、冲突点、个人魅力、原则和底线。
+                5. 给出角色互动关系图和叙述视角说明。
+                6. 使用第三人称叙述说明。
 
-            【文风流水线】
-            %s
+                """
+                + characterExtra
+                + """
 
-            【重要】每个角色必须明确标注：
-            - 目标（want）：角色最想要什么
-            - 恐惧（fear）：角色最怕什么
-            - 信息差（knowledge）：角色知道什么/不知道什么
+                【文风流水线】
+                """
+                + styleGuide(pipeline)
+                + """
 
-            【输出格式要求】
-            你必须只输出 JSON，且只能输出一个 JSON 对象，格式如下：
-            {
-              "characters": [
+                【重要】每个角色必须明确标注：
+                - 目标（want）：角色最想要什么
+                - 恐惧（fear）：角色最怕什么
+                - 信息差（knowledge）：角色知道什么/不知道什么
+
+                【输出格式要求】
+                你必须只输出 JSON，且只能输出一个 JSON 对象，格式如下：
                 {
-                  "name": "角色名",
-                  "type": "主角/配角/反派",
-                  "want": "...",
-                  "fear": "...",
-                  "knowledge": "...",
-                  "summary": "简短角色简介"
+                  "characters": [
+                    {
+                      "name": "角色名",
+                      "type": "主角/配角/反派",
+                      "want": "...",
+                      "fear": "...",
+                      "knowledge": "...",
+                      "summary": "简短角色简介"
+                    }
+                  ]
                 }
-              ]
-            }
-            严禁输出 markdown 代码块、解释文本、前后缀说明、额外字段。
-            """, topic, buildSettingBlock(generationSetting), characterExtra, styleGuide(pipeline));
+                严禁输出 markdown 代码块、解释文本、前后缀说明、额外字段。
+                """;
 
         return callAi(prompt, startTime, "角色设定生成");
+    }
+
+    /** 角色生成专用：从冲突图谱中抽出与姓名/关系对齐的字段，控制长度。 */
+    private String buildGraphCharacterAnchorJson(String outlineGraphJson) {
+        if (outlineGraphJson == null || outlineGraphJson.isBlank()) {
+            return "";
+        }
+        try {
+            JsonNode n = objectMapper.readTree(outlineGraphJson);
+            ObjectNode out = objectMapper.createObjectNode();
+            JsonNode cast = n.path("cast");
+            if (cast.isArray() && !cast.isEmpty()) {
+                out.set("cast", cast);
+            }
+            out.set("setup", n.path("setup"));
+            out.set("conflicts", n.path("conflicts"));
+            out.set("tension_matrix", n.path("tension_matrix"));
+            String s = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(out);
+            int cap = 12000;
+            return s.length() > cap ? s.substring(0, cap) + "\n...(truncated)" : s;
+        } catch (Exception e) {
+            log.warn("【角色锚定】冲突图谱摘录失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     private String callAi(String prompt, long startTime, String actionName) {
@@ -298,6 +1141,282 @@ public class NovelGenerationAgent {
             log.error("【🤖 AI调用】❌ {}失败 - 耗时: {}ms", actionName, elapsed, e);
             throw e;
         }
+    }
+
+    /** M2 Planner：低温、短输出；失败不抛给上层。 */
+    private String callAiPlanner(String prompt, long startTime, String actionName) {
+        log.debug("【🤖 Planner】{}提示词长度: {} 字符", actionName, prompt.length());
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(Math.max(0, Math.min(2, narrativePlannerTemperature)))
+                .maxTokens(Math.max(256, Math.min(4096, narrativePlannerMaxTokens)))
+                .build();
+        try {
+            String result = chatClient.prompt(prompt).options(opts).call().content();
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.info("【🤖 Planner】✅ {}成功 - 耗时: {}ms, 结果长度: {} 字符", actionName, elapsed, result == null ? 0 : result.length());
+            return result == null ? "" : result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - startTime;
+            log.warn("【🤖 Planner】❌ {}失败 - 耗时: {}ms, {}", actionName, elapsed, e.getMessage());
+            return "";
+        }
+    }
+
+    private String narrativeProfileForPlannerPrompt(NarrativeProfile p) {
+        if (p == null) return "（无）";
+        StringBuilder sb = new StringBuilder();
+        sb.append("- 主情绪类型：").append(p.emotionType()).append("\n");
+        sb.append(String.format(Locale.ROOT, "- 强度带宽：[%.2f, %.2f]；压抑度：%.2f\n",
+                p.intensityMin(), p.intensityMax(), p.suppression()));
+        if (p.triggerFact() != null && !p.triggerFact().isBlank()) {
+            sb.append("- 触发事实锚点：").append(p.triggerFact()).append("\n");
+        }
+        if (p.rhythmHint() != null && !p.rhythmHint().isBlank()) {
+            sb.append("- 节奏意图：").append(p.rhythmHint()).append("\n");
+        }
+        if (p.textureHint() != null && !p.textureHint().isBlank()) {
+            sb.append("- 语言材质：").append(p.textureHint()).append("\n");
+        }
+        if (p.affection() != null || p.awkwardness() != null || p.assertiveness() != null) {
+            sb.append("- 轻小说微情绪维：");
+            if (p.affection() != null) sb.append(String.format(Locale.ROOT, "好感%.2f ", p.affection()));
+            if (p.awkwardness() != null) sb.append(String.format(Locale.ROOT, "别扭%.2f ", p.awkwardness()));
+            if (p.assertiveness() != null) sb.append(String.format(Locale.ROOT, "主动%.2f", p.assertiveness()));
+            sb.append("\n");
+        }
+        if (!p.forbiddenLines().isEmpty()) {
+            sb.append("- 禁止项：").append(String.join("；", p.forbiddenLines())).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildNarrativeTwoPhasePlannerBlock(int chapterNumber,
+                                                      WritingPipeline pipeline,
+                                                      String outline,
+                                                      String previousContent,
+                                                      String characterProfile,
+                                                      String novelSetting,
+                                                      String chapterSetting,
+                                                      String immutableConstraints,
+                                                      NarrativeProfile profile,
+                                                      NarrativeEngineArtifactSink artifactSink) {
+        long startTime = System.currentTimeMillis();
+        String outlineClip = clipForPlan(outline, NE_PLAN_OUTLINE_CLIP);
+        String profileClip = clipForPlan(characterProfile, NE_PLAN_PROFILE_CLIP);
+        String prevClip = clipForPlan(previousContent, NE_PLAN_PREV_CLIP);
+        String immutableClip = clipForPlan(immutableConstraints, NE_PLAN_IMMUTABLE_CLIP);
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        String prompt = String.format("""
+                你是网络小说叙事策划编辑。请只输出一个 JSON 对象，禁止 markdown 代码块、禁止解释前后缀。
+
+                【全书大纲（节选）】
+                %s
+
+                【角色档案（节选）】
+                %s
+
+                %s
+
+                %s
+
+                %s
+
+                【叙事引擎参数（须遵守其强度带宽与禁止项）】
+                %s
+
+                【上一章衔接材料（勿照搬扩写；规划连贯即可）】
+                %s
+
+                【文风流水线】%s
+
+                【任务】为第 %d 章制定「叙事脚本」（服务于正文写作，不是写正文）：
+                1. mainObjective：本章唯一主线目标，一句话。
+                2. emotionArc：字符串数组，3～6 条，描述本章情绪走向（可含约强度如「压抑→抬头→回落」），须落在叙事引擎给出的强度带宽内波动，避免全程同一强度。
+                3. beats：3～5 条可演出场面（谁、在哪、发生什么），顺序即正文推荐顺序。
+                4. opening：开场钩子一句话。
+                5. closing：结尾悬念或转折一句话；禁止「下一章预告」元叙事。
+                6. mustAvoid：2～5 条短语，列出衔接材料里已交代、正文禁止再长篇复述的信息点。
+                7. reasonShort：一两句说明为何如此分配节奏（可给正文作者看）。
+                8. expectedObstacle（或 expected_obstacle）：本章须出现的一次「非最优决策、意外阻断、或须付出代价的选择」，一句话；若无请写「无」并在 reasonShort 里说明为何本章仍成立。
+                9. riskPoint（或 risk_point）：一个可能失败或节外生枝的动作节点，一句话。
+                10. delayMechanism（或 delay_mechanism）：成功或兑现为何不能一次到位、须二次尝试或补救，一句话。
+
+                JSON 字段名必须完全一致（阻力三项可同时给出 camelCase 与 snake_case 之一即可）：
+                {
+                  "mainObjective": "...",
+                  "emotionArc": ["...", "..."],
+                  "beats": ["...", "..."],
+                  "opening": "...",
+                  "closing": "...",
+                  "mustAvoid": ["...", "..."],
+                  "reasonShort": "...",
+                  "expectedObstacle": "...",
+                  "riskPoint": "...",
+                  "delayMechanism": "..."
+                }
+                """,
+                outlineClip.isBlank() ? "（无）" : outlineClip,
+                profileClip.isBlank() ? "（无）" : profileClip,
+                buildSettingBlock(novelSetting),
+                buildChapterSettingBlock(chapterSetting),
+                buildImmutableConstraintsBlock(immutableClip.isBlank() ? null : immutableClip),
+                narrativeProfileForPlannerPrompt(profile),
+                prevClip.isBlank() ? "（无：第1章或无前文）" : prevClip,
+                p.name(),
+                chapterNumber);
+        try {
+            String raw = callAiPlanner(prompt, startTime, "叙事引擎M2章前规划");
+            String formatted = formatNarrativePlannerJson(raw, p, narrativeResistanceLayerEnabled && narrativeEngineEnabled);
+            if (artifactSink != null) {
+                if (formatted != null && !formatted.isBlank()) {
+                    artifactSink.recordPlannerApplied(raw, formatted);
+                } else {
+                    artifactSink.recordPlannerError("planner_empty_or_parse_failed");
+                }
+            }
+            if (formatted != null && !formatted.isBlank()) {
+                log.info("【叙事引擎M2】第{}章 Planner 脚本已注入初稿提示词", chapterNumber);
+            }
+            return formatted == null ? "" : formatted;
+        } catch (Exception e) {
+            log.warn("【叙事引擎M2】第{}章 Planner 异常，跳过: {}", chapterNumber, e.getMessage());
+            if (artifactSink != null) {
+                artifactSink.recordPlannerError(e.getMessage() == null ? "planner_exception" : e.getMessage());
+            }
+            return "";
+        }
+    }
+
+    private String formatNarrativePlannerJson(String raw, WritingPipeline pipeline, boolean resistanceLayerEnabled) {
+        if (raw == null || raw.isBlank()) return "";
+        WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        try {
+            JsonNode root = objectMapper.readTree(extractFirstJsonObject(raw));
+            String main = root.path("mainObjective").asText("").trim();
+            if (main.isEmpty()) {
+                main = root.path("main_objective").asText("").trim();
+            }
+            String opening = root.path("opening").asText("").trim();
+            String closing = root.path("closing").asText("").trim();
+            String reason = root.path("reasonShort").asText("").trim();
+            if (reason.isEmpty()) {
+                reason = root.path("reason_short").asText("").trim();
+            }
+
+            List<String> arc = new ArrayList<>();
+            JsonNode arcNode = root.path("emotionArc");
+            if (!arcNode.isArray()) {
+                arcNode = root.path("emotion_arc");
+            }
+            if (arcNode.isArray()) {
+                for (JsonNode a : arcNode) {
+                    String line = a.asText("").trim();
+                    if (!line.isEmpty()) arc.add(line);
+                }
+            }
+
+            List<String> beats = new ArrayList<>();
+            JsonNode beatsNode = root.path("beats");
+            if (beatsNode.isArray()) {
+                for (JsonNode b : beatsNode) {
+                    String line = b.asText("").trim();
+                    if (!line.isEmpty()) beats.add(line);
+                }
+            }
+
+            List<String> avoids = new ArrayList<>();
+            JsonNode avoidNode = root.path("mustAvoid");
+            if (!avoidNode.isArray()) {
+                avoidNode = root.path("must_avoid");
+            }
+            if (avoidNode.isArray()) {
+                for (JsonNode a : avoidNode) {
+                    String line = a.asText("").trim();
+                    if (!line.isEmpty()) avoids.add(line);
+                }
+            }
+
+            if (main.isEmpty() && beats.isEmpty()) {
+                return "";
+            }
+
+            String obs = plannerResistanceTextOr(root, "expectedObstacle", "expected_obstacle");
+            String risk = plannerResistanceTextOr(root, "riskPoint", "risk_point");
+            String delay = plannerResistanceTextOr(root, "delayMechanism", "delay_mechanism");
+            boolean hasResistanceFields = plannerResistanceMeaningful(obs) || plannerResistanceMeaningful(risk)
+                    || plannerResistanceMeaningful(delay);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("【本章叙事脚本｜Planner（M2）｜须严格遵守】\n");
+            if (!main.isEmpty()) {
+                sb.append("- 本章唯一主线：").append(main).append("\n");
+            }
+            if (!arc.isEmpty()) {
+                sb.append("- 情绪弧线（正文须体现起伏，勿平推）：\n");
+                for (int i = 0; i < arc.size(); i++) {
+                    sb.append("  ").append(i + 1).append(". ").append(arc.get(i)).append("\n");
+                }
+            }
+            if (!opening.isEmpty()) {
+                sb.append("- 开场钩子：").append(opening).append("\n");
+            }
+            if (!beats.isEmpty()) {
+                sb.append("- 节拍（正文须按序落地，可用对白与场面扩展，不得另起平行主线取代）：\n");
+                for (int i = 0; i < beats.size(); i++) {
+                    sb.append("  ").append(i + 1).append(". ").append(beats.get(i)).append("\n");
+                }
+            }
+            if (!closing.isEmpty()) {
+                sb.append("- 结尾钩子：").append(closing).append("\n");
+            }
+            if (!avoids.isEmpty()) {
+                sb.append("- 禁止复述（只可一句带过或不提）：").append(String.join("；", avoids)).append("\n");
+            }
+            if (!reason.isEmpty()) {
+                sb.append("- 策划说明：").append(reason).append("\n");
+            }
+            if (resistanceLayerEnabled) {
+                if (hasResistanceFields) {
+                    sb.append("\n【本章阻力纪律｜Planner】\n");
+                    if (plannerResistanceMeaningful(obs)) {
+                        sb.append("- 预期障碍/代价选择：").append(obs).append("\n");
+                    }
+                    if (plannerResistanceMeaningful(risk)) {
+                        sb.append("- 风险节点：").append(risk).append("\n");
+                    }
+                    if (plannerResistanceMeaningful(delay)) {
+                        sb.append("- 延误/二次机制：").append(delay).append("\n");
+                    }
+                    sb.append("- 【执行】上述须在正文中有可见落地，不得口号式一笔带过；结局事实仍须服从大纲。\n");
+                } else {
+                    sb.append("\n").append(NarrativeCraftPrompts.narrativeResistanceSoftFallback(p)).append("\n");
+                }
+            }
+            sb.append("- 【脚本服从】本节为章节叙事骨架；禁止用复述衔接材料填满篇幅取代节拍。\n");
+            return sb.toString().trim();
+        } catch (Exception e) {
+            log.warn("【叙事引擎M2】JSON 解析失败: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    private static String plannerResistanceTextOr(JsonNode root, String camel, String snake) {
+        String a = root.path(camel).asText("").trim();
+        if (!a.isEmpty()) {
+            return a;
+        }
+        return root.path(snake).asText("").trim();
+    }
+
+    private static boolean plannerResistanceMeaningful(String s) {
+        if (s == null) {
+            return false;
+        }
+        String t = s.trim();
+        if (t.isEmpty()) {
+            return false;
+        }
+        return !t.equals("无") && !t.equals("暂无") && !t.equals("无。");
     }
 
     private String buildSettingBlock(String setting) {
@@ -320,6 +1439,147 @@ public class NovelGenerationAgent {
         }
         String normalized = nextContent.trim();
         return normalized.length() <= 1500 ? normalized : normalized.substring(0, 1500) + "\n...(已截断)";
+    }
+
+    /** 轻小说：章前节拍规划（JSON），失败返回空串以便跳过。 */
+    private String buildLightNovelChapterPlanBlock(int chapterNumber, String outline, String previousContent,
+                                                  String characterProfile, String novelSetting, String chapterSetting,
+                                                  String immutableConstraints) {
+        long startTime = System.currentTimeMillis();
+        String outlineClip = clipForPlan(outline, LN_PLAN_OUTLINE_CLIP);
+        String profileClip = clipForPlan(characterProfile, LN_PLAN_PROFILE_CLIP);
+        String prevClip = clipForPlan(previousContent, LN_PLAN_PREV_CLIP);
+        String immutableClip = clipForPlan(immutableConstraints, LN_PLAN_IMMUTABLE_CLIP);
+        String prompt = String.format("""
+                你是轻小说章节策划编辑。请只输出一个 JSON 对象，禁止 markdown 代码块、禁止解释前后缀。
+
+                【全书大纲（节选）】
+                %s
+
+                【角色档案（节选）】
+                %s
+
+                %s
+
+                %s
+
+                %s
+
+                【上一章衔接或回顾材料（勿照搬扩写；规划时考虑连贯即可）】
+                %s
+
+                【任务】为第 %d 章制定写作节拍：
+                1. 本章只能有一条主线目标（mainObjective），所有场面服务这条线。
+                2. beats 数组必须 3～5 条，每条是可演出的具体场面（谁、在哪、发生什么），禁止空话设定清单。
+                3. opening：开场钩子一句话（危机/误会/反常其一）。
+                4. closing：结尾具体的悬念或场面转折一句话；禁止「下一章预告」类元叙事。
+                5. mustAvoid：2～5 条短语，列出衔接材料里已交代、正文禁止再长篇复述的信息点。
+
+                JSON 格式（字段名必须一致）：
+                {
+                  "mainObjective": "...",
+                  "beats": ["...", "...", "..."],
+                  "opening": "...",
+                  "closing": "...",
+                  "mustAvoid": ["...", "..."]
+                }
+                """,
+                outlineClip.isBlank() ? "（无）" : outlineClip,
+                profileClip.isBlank() ? "（无）" : profileClip,
+                buildSettingBlock(novelSetting),
+                buildChapterSettingBlock(chapterSetting),
+                buildImmutableConstraintsBlock(immutableClip.isBlank() ? null : immutableClip),
+                prevClip.isBlank() ? "（无：第1章或无前文）" : prevClip,
+                chapterNumber);
+        try {
+            String raw = callAi(prompt, startTime, "轻小说章拍规划");
+            String formatted = formatLightNovelPlanJson(raw);
+            if (!formatted.isBlank()) {
+                log.info("【轻小说章拍规划】第{}章节拍已注入初稿提示词", chapterNumber);
+            }
+            return formatted;
+        } catch (Exception e) {
+            log.warn("【轻小说章拍规划】第{}章失败，跳过节拍注入: {}", chapterNumber, e.getMessage());
+            return "";
+        }
+    }
+
+    private static String clipForPlan(String text, int maxChars) {
+        if (text == null || text.isBlank()) return "";
+        String t = text.trim();
+        return t.length() <= maxChars ? t : t.substring(0, maxChars) + "\n...(已截断)";
+    }
+
+    private static String extractFirstJsonObject(String raw) {
+        if (raw == null) return "";
+        String t = raw.trim();
+        int i = t.indexOf('{');
+        int j = t.lastIndexOf('}');
+        if (i >= 0 && j > i) {
+            return t.substring(i, j + 1);
+        }
+        return t;
+    }
+
+    private String formatLightNovelPlanJson(String raw) {
+        if (raw == null || raw.isBlank()) return "";
+        try {
+            JsonNode root = objectMapper.readTree(extractFirstJsonObject(raw));
+            String main = root.path("mainObjective").asText("").trim();
+            String opening = root.path("opening").asText("").trim();
+            String closing = root.path("closing").asText("").trim();
+            JsonNode beatsNode = root.path("beats");
+            JsonNode avoidNode = root.path("mustAvoid");
+
+            List<String> beats = new ArrayList<>();
+            if (beatsNode.isArray()) {
+                for (JsonNode b : beatsNode) {
+                    String line = b.asText("").trim();
+                    if (!line.isEmpty()) {
+                        beats.add(line);
+                    }
+                }
+            }
+            List<String> avoids = new ArrayList<>();
+            if (avoidNode.isArray()) {
+                for (JsonNode a : avoidNode) {
+                    String line = a.asText("").trim();
+                    if (!line.isEmpty()) {
+                        avoids.add(line);
+                    }
+                }
+            }
+            if (main.isEmpty() && beats.isEmpty()) {
+                return "";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("【本章节拍规划｜须严格遵守】\n");
+            if (!main.isEmpty()) {
+                sb.append("- 本章唯一主线：").append(main).append("\n");
+            }
+            if (!opening.isEmpty()) {
+                sb.append("- 开场钩子：").append(opening).append("\n");
+            }
+            if (!beats.isEmpty()) {
+                sb.append("- 节拍（正文须按序落地，可用对白与场面扩展，不得跳过）：\n");
+                for (int i = 0; i < beats.size(); i++) {
+                    sb.append("  ").append(i + 1).append(". ").append(beats.get(i)).append("\n");
+                }
+            }
+            if (!closing.isEmpty()) {
+                sb.append("- 结尾钩子：").append(closing).append("\n");
+            }
+            if (!avoids.isEmpty()) {
+                sb.append("- 禁止复述（只可一句带过或不提）：");
+                sb.append(String.join("；", avoids)).append("\n");
+            }
+            sb.append("- 【节拍服从】上文节拍即本章骨架：禁止另起一套平行剧情取代节拍；禁止用复述衔接材料填满篇幅。\n");
+            return sb.toString().trim();
+        } catch (Exception e) {
+            log.warn("【轻小说章拍规划】JSON 解析失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     private String mergeSettings(String base, String novelSetting, String chapterSetting) {
@@ -361,6 +1621,13 @@ public class NovelGenerationAgent {
         return "【一致性硬约束】\n" + immutableConstraints.trim();
     }
 
+    /** 前端可传入的规划参数 clamp，再交给 {@link NarrativeCraftPrompts#outlineLongFormRoadmapBlock} 做二次下限。 */
+    private static int[] clampOutlinePlanParams(int detailedPrefix, int minRoadmap) {
+        int dp = Math.min(150, Math.max(15, detailedPrefix));
+        int mr = Math.min(600, Math.max(minRoadmap, dp + 15));
+        return new int[] { dp, mr };
+    }
+
     private int textLength(String text) {
         return text == null ? 0 : text.length();
     }
@@ -384,14 +1651,31 @@ public class NovelGenerationAgent {
         }
     }
 
-    private String deAiFinalize(String content, int chapterNumber, WritingPipeline pipeline, boolean hotMemeEnabled) {
+    private String deAiFinalize(String content, int chapterNumber, WritingPipeline pipeline, boolean hotMemeEnabled,
+                                WritingStyleHints styleHints, NarrativeProfile narrativeProfile,
+                                NarrativePhysicsMode narrativePhysicsMode) {
         long startTime = System.currentTimeMillis();
         String deAiFocus = NarrativeCraftPrompts.deAiNarrativeFocusBlock();
         if (isShuangwenPipeline(pipeline)) {
             deAiFocus = deAiFocus + "\n" + NarrativeCraftPrompts.deAiShuangwenPreserveBlock();
+        } else {
+            String deAiPipe = NarrativeCraftPrompts.deAiPipelinePreserveBlock(pipeline);
+            if (!deAiPipe.isBlank()) {
+                deAiFocus = deAiFocus + "\n" + deAiPipe;
+            }
         }
         if (hotMemeEnabled) {
             deAiFocus = deAiFocus + "\n" + NarrativeCraftPrompts.deAiHotMemeTrimBlock();
+        }
+        String microDeAi = NarrativeCraftPrompts.styleMicroParamsBlock(styleHints);
+        if (!microDeAi.isBlank()) {
+            deAiFocus = deAiFocus + "\n" + microDeAi;
+        }
+        if (narrativeEngineEnabled && narrativeProfile != null) {
+            NarrativePhysicsMode physics = narrativePhysicsMode != null
+                    ? narrativePhysicsMode
+                    : NarrativePhysicsMode.fromPipeline(pipeline);
+            deAiFocus = deAiFocus + NarrativeCraftPrompts.narrativeEngineDeAiReminder(narrativeProfile, pipeline, physics);
         }
         String prompt = String.format("""
             你是资深小说统稿编辑。请在不改变剧情事实的前提下，消除 AI 痕迹并保持文风统一。

@@ -18,6 +18,12 @@ public interface GenerationTaskRepository extends JpaRepository<GenerationTask, 
     List<GenerationTask> findByStatusInOrderByCreateTimeAsc(Collection<String> statuses);
     List<GenerationTask> findByNovelIdAndStatusInOrderByCreateTimeAsc(Long novelId, Collection<String> statuses);
 
+    @Query("SELECT COUNT(t) FROM GenerationTask t WHERE t.novelId = :novelId "
+            + "AND t.status IN :statuses AND t.taskType IN :taskTypes")
+    long countActiveByNovelAndTaskTypes(@Param("novelId") Long novelId,
+                                        @Param("statuses") Collection<String> statuses,
+                                        @Param("taskTypes") Collection<String> taskTypes);
+
     @Query("SELECT COUNT(t) FROM GenerationTask t WHERE t.novelId = :novelId " +
             "AND t.status IN :statuses " +
             "AND t.rangeFrom IS NOT NULL AND t.rangeTo IS NOT NULL " +
@@ -35,4 +41,9 @@ public interface GenerationTaskRepository extends JpaRepository<GenerationTask, 
                             @Param("pending") String pending,
                             @Param("running") String running,
                             @Param("now") java.time.LocalDateTime now);
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("DELETE FROM GenerationTask t WHERE t.novelId = :novelId")
+    void deleteAllByNovelId(@Param("novelId") Long novelId);
 }

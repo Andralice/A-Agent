@@ -1,0 +1,25 @@
+# 示例：安装到服务器后按需改名/改路径
+#   sudo cp note/novel-agent.service.example /etc/systemd/system/novel-agent.service
+#   sudo nano /etc/systemd/system/novel-agent.service   # User / WorkingDirectory / java 路径
+#   在服务器创建 /opt/qq-bot/novel-agent.env（参考 novel-agent.env.example）
+#   sudo systemctl daemon-reload && sudo systemctl enable --now novel-agent
+#
+# 本机一键发布（jar）：DEPLOY_MODE=systemd ./note/deploy.sh
+
+[Unit]
+Description=novel-agent Spring Boot
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=alice
+WorkingDirectory=/opt/qq-bot
+EnvironmentFile=-/opt/qq-bot/novel-agent.env
+ExecStart=/usr/bin/java -Xms256m -Xmx768m -jar /opt/qq-bot/novel-agent-1.0-SNAPSHOT.jar
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

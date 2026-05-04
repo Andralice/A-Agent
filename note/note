@@ -9,3 +9,4 @@ $env:SPRING_DATASOURCE_PASSWORD='My$qlR00t#2026'
 $env:OPENAI_API_KEY='sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk'
 $env:OPENAI_BASE_URL='https://api.meai.cloud'
 mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+.\note\deploy.ps1

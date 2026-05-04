@@ -33,4 +33,9 @@ public interface ChapterRepository extends JpaRepository<Chapter, Long> {
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("UPDATE Chapter c SET c.writeState = :ready")
     void resetWriteStateGlobally(@Param("ready") String ready);
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("DELETE FROM Chapter c WHERE c.novelId = :novelId")
+    void deleteAllByNovelId(@Param("novelId") Long novelId);
 }

@@ -20,7 +20,12 @@ public class ApiResponse<T> {
     }
 
     public static <T> ApiResponse<T> error(String message) {
-        return new ApiResponse<>(500, message, null);
+        return error(500, message);
+    }
+
+    /** HTTP 语义码：如 400 参数错误、404 未找到、500 通用失败（前端用来区分 toast 类型）。 */
+    public static <T> ApiResponse<T> error(int code, String message) {
+        return new ApiResponse<>(code, message, null);
     }
 }
 

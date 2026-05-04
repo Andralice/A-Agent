@@ -15,10 +15,24 @@ public class GenerationLogService {
 
     @Transactional
     public void saveGenerationLog(Long novelId, Integer chapterNumber, String generationType, int responseLength, long elapsedMs, String status, String errorMessage) {
+        saveGenerationLog(novelId, chapterNumber, generationType, responseLength, elapsedMs, status, errorMessage, null);
+    }
+
+    @Transactional
+    public void saveGenerationLog(Long novelId, Integer chapterNumber, String generationType, int responseLength, long elapsedMs, String status, String errorMessage, String contextNote) {
         try {
             GenerationLog logItem = new GenerationLog();
-            logItem.setNovelId(novelId); logItem.setChapterNumber(chapterNumber); logItem.setGenerationType(generationType); logItem.setResponseLength(responseLength); logItem.setElapsedMs(elapsedMs); logItem.setStatus(status); logItem.setErrorMessage(errorMessage);
+            logItem.setNovelId(novelId);
+            logItem.setChapterNumber(chapterNumber);
+            logItem.setGenerationType(generationType);
+            logItem.setResponseLength(responseLength);
+            logItem.setElapsedMs(elapsedMs);
+            logItem.setStatus(status);
+            logItem.setErrorMessage(errorMessage);
+            logItem.setContextNote(contextNote);
             generationLogRepository.save(logItem);
-        } catch (Exception e) { log.error("【日志记录】❌ 保存生成日志失败", e); }
+        } catch (Exception e) {
+            log.error("【日志记录】❌ 保存生成日志失败", e);
+        }
     }
 }

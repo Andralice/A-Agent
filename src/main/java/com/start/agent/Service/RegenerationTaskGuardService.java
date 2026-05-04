@@ -3,8 +3,10 @@ package com.start.agent.service;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -13,8 +15,36 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class RegenerationTaskGuardService {
     private final Map<Long, List<Range>> runningRangesByNovel = new ConcurrentHashMap<>();
+    /** 进程内：大纲重写占用期间禁止章节区间锁（与 DB 租约配合）。 */
+    private final Set<Long> outlineRegenerationNovelIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    /**
+     * 大纲重写开始前占用；与 {@link #tryAcquireRange} 互斥，也与已有章节区间互斥。
+     */
+    public synchronized boolean tryAcquireOutlineRegenerationLock(Long novelId) {
+        if (outlineRegenerationNovelIds.contains(novelId)) {
+            return false;
+        }
+        List<Range> ranges = runningRangesByNovel.get(novelId);
+        if (ranges != null && !ranges.isEmpty()) {
+            return false;
+        }
+        outlineRegenerationNovelIds.add(novelId);
+        return true;
+    }
+
+    public synchronized void releaseOutlineRegenerationLock(Long novelId) {
+        outlineRegenerationNovelIds.remove(novelId);
+    }
+
+    public synchronized boolean hasOutlineRegenerationLock(Long novelId) {
+        return outlineRegenerationNovelIds.contains(novelId);
+    }
 
     public synchronized boolean tryAcquireRange(Long novelId, int fromChapter, int toChapter) {
+        if (outlineRegenerationNovelIds.contains(novelId)) {
+            return false;
+        }
         List<Range> ranges = runningRangesByNovel.computeIfAbsent(novelId, id -> new ArrayList<>());
         for (Range range : ranges) {
             if (range.overlaps(fromChapter, toChapter)) {

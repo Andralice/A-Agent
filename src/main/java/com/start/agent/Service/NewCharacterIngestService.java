@@ -1,9 +1,11 @@
 package com.start.agent.service;
 
 import com.start.agent.agent.NovelGenerationAgent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.Novel;
 import com.start.agent.model.WritingPipeline;
+import com.start.agent.model.WritingStyleHints;
 import com.start.agent.repository.ChapterFactRepository;
 import com.start.agent.repository.ChapterRepository;
 import com.start.agent.repository.NovelRepository;
@@ -25,6 +27,7 @@ public class NewCharacterIngestService {
     private final NovelRepository novelRepository;
     private final CharacterProfileService characterProfileService;
     private final NovelGenerationAgent generationAgent;
+    private final ObjectMapper objectMapper;
 
     /** 统计窗口：近 N 章。 */
     private final int windowChapters;
@@ -38,6 +41,7 @@ public class NewCharacterIngestService {
                                      NovelRepository novelRepository,
                                      CharacterProfileService characterProfileService,
                                      NovelGenerationAgent generationAgent,
+                                     ObjectMapper objectMapper,
                                      @Value("${novel.new-characters.window-chapters:8}") int windowChapters,
                                      @Value("${novel.new-characters.min-mentions:2}") int minMentions,
                                      @Value("${novel.new-characters.max-per-run:3}") int maxIngestPerRun) {
@@ -46,6 +50,7 @@ public class NewCharacterIngestService {
         this.novelRepository = novelRepository;
         this.characterProfileService = characterProfileService;
         this.generationAgent = generationAgent;
+        this.objectMapper = objectMapper;
         this.windowChapters = Math.max(3, windowChapters);
         this.minMentions = Math.max(2, minMentions);
         this.maxIngestPerRun = Math.max(1, maxIngestPerRun);
@@ -106,8 +111,10 @@ public class NewCharacterIngestService {
         }
 
         String promptSetting = buildNewCharacterSetting(novel, candidates);
+        WritingStyleHints styleHints = WritingStyleHints.parseNullable(novel.getWritingStyleParams(), objectMapper);
         try {
-            String profileJson = generationAgent.generateCharacterProfile(novel.getTopic(), promptSetting, pipeline);
+            String profileJson = generationAgent.generateCharacterProfile(novel.getTopic(), promptSetting, pipeline, false, styleHints,
+                    novel.getDescription(), novel.getOutlineGraphJson());
             int saved = characterProfileService.saveCharacterProfilesJsonWithMode(novelId, profileJson, false, candidates);
             if (saved > 0) {
                 log.info("新增角色已入库 novelId={}, candidates={}, saved={}", novelId, candidates, saved);
