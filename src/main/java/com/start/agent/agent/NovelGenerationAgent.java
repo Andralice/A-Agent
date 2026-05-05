@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.model.WritingStyleHints;
+import com.start.agent.narrative.CognitionArcResolver;
+import com.start.agent.narrative.CognitionArcSnapshot;
+import com.start.agent.narrative.ProseCraftResolver;
+import com.start.agent.narrative.ProseCraftSnapshot;
 import com.start.agent.narrative.NarrativeCriticReport;
 import com.start.agent.narrative.NarrativeEngineArtifactSink;
 import com.start.agent.narrative.NarrativeLint;
@@ -46,6 +50,8 @@ public class NovelGenerationAgent {
     private final ConsistencyReviewAgent consistencyAgent;
     private final ObjectMapper objectMapper;
     private final NarrativeProfileResolver narrativeProfileResolver;
+    private final CognitionArcResolver cognitionArcResolver;
+    private final ProseCraftResolver proseCraftResolver;
 
     /** 轻小说章前节拍规划（多一次模型调用）；可通过配置关闭。 */
     @Value("${novel.light-novel.chapter-planning-enabled:true}")
@@ -154,13 +160,17 @@ public class NovelGenerationAgent {
             PolishingAgent polishingAgent,
             ConsistencyReviewAgent consistencyAgent,
             ObjectMapper objectMapper,
-            NarrativeProfileResolver narrativeProfileResolver) {
+            NarrativeProfileResolver narrativeProfileResolver,
+            CognitionArcResolver cognitionArcResolver,
+            ProseCraftResolver proseCraftResolver) {
         this.chatClient = chatClientBuilder.build();
         this.reviewAgent = reviewAgent;
         this.polishingAgent = polishingAgent;
         this.consistencyAgent = consistencyAgent;
         this.objectMapper = objectMapper;
         this.narrativeProfileResolver = narrativeProfileResolver;
+        this.cognitionArcResolver = cognitionArcResolver;
+        this.proseCraftResolver = proseCraftResolver;
         log.info("【AI代理初始化】NovelGenerationAgent 已就绪（生态型AI - 因果驱动版）");
     }
 
@@ -539,7 +549,7 @@ public class NovelGenerationAgent {
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, false, null, null, null, null, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, false, null, null, null, null, null, null);
     }
 
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
@@ -547,7 +557,7 @@ public class NovelGenerationAgent {
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline, boolean hotMemeEnabled) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, null, null, null, null, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, null, null, null, null, null, null);
     }
 
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
@@ -555,7 +565,7 @@ public class NovelGenerationAgent {
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, null, null, null, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, null, null, null, null, null);
     }
 
     /**
@@ -567,7 +577,7 @@ public class NovelGenerationAgent {
                                   WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
                                   NarrativeProfile narrativeProfile) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, null, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, null, null, null);
     }
 
     /**
@@ -579,7 +589,7 @@ public class NovelGenerationAgent {
                                   WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
                                   NarrativeProfile narrativeProfile, String narrativeCarryover) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, narrativeCarryover, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, null, narrativeCarryover, null, null);
     }
 
     /**
@@ -592,18 +602,20 @@ public class NovelGenerationAgent {
                                   NarrativeProfile narrativeProfile, NarrativePhysicsMode narrativePhysicsMode,
                                   String narrativeCarryover) {
         return generateChapter(outline, chapterNumber, previousContent, nextContent, characterProfile, previousChaptersSummary,
-                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, narrativePhysicsMode, narrativeCarryover, null);
+                novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, narrativeProfile, narrativePhysicsMode, narrativeCarryover, null, null);
     }
 
     /**
      * @param artifactSink M7：可为 null；非 null 时写入 Planner/Lint 快照供落库。
+     * @param writingStyleParamsJson 书本级文风 JSON；用于解析 {@code narrativeArcPhase}/{@code cognitionArc}，可为 null。
      */
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
                                   String characterProfile, String previousChaptersSummary,
                                   String novelSetting, String chapterSetting, String immutableConstraints,
                                   WritingPipeline pipeline, boolean hotMemeEnabled, WritingStyleHints styleHints,
                                   NarrativeProfile narrativeProfile, NarrativePhysicsMode narrativePhysicsMode,
-                                  String narrativeCarryover, NarrativeEngineArtifactSink artifactSink) {
+                                  String narrativeCarryover, NarrativeEngineArtifactSink artifactSink,
+                                  String writingStyleParamsJson) {
         log.info("【📝 生态型AI】开始第{}章创作（因果驱动模式），hotMeme={}", chapterNumber, hotMemeEnabled);
         long totalStartTime = System.currentTimeMillis();
         NarrativeProfile effectiveProfile = resolveNarrativeProfile(pipeline, narrativeProfile);
@@ -613,7 +625,7 @@ public class NovelGenerationAgent {
 
         try {
             log.info("【步骤1/5】调用创作Agent生成初稿...");
-            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics, narrativeCarryover, artifactSink);
+            String draft = generateDraft(outline, chapterNumber, previousContent, nextContent, characterProfile, novelSetting, chapterSetting, immutableConstraints, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics, narrativeCarryover, artifactSink, writingStyleParamsJson);
             log.info("【步骤1/5】✅ 初稿生成成功，长度: {} 字符", draft.length());
 
             log.info("【步骤2/5】调用一致性审查Agent...");
@@ -648,10 +660,12 @@ public class NovelGenerationAgent {
             if (!microPolish.isBlank()) {
                 polishingOutline = polishingOutline + "\n\n" + microPolish;
             }
+            String prosePolishBlock = NarrativeCraftPrompts.proseCraftPolishBlock(proseCraftResolver.resolve(writingStyleParamsJson));
             final String polishingOutlineFinal = polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline)
                     + (narrativeEngineEnabled && effectiveProfile != null
                     ? NarrativeCraftPrompts.narrativeEnginePolishReminder(effectiveProfile, pipeline, effectivePhysics)
-                    : "");
+                    : "")
+                    + (prosePolishBlock.isBlank() ? "" : "\n\n" + prosePolishBlock);
             String polishedContent = safeStep(
                     "文笔润色",
                     () -> polishingAgent.polish(reviewedContent, polishingOutlineFinal, chapterNumber, pipeline),
@@ -840,9 +854,12 @@ public class NovelGenerationAgent {
                                  String immutableConstraints, WritingPipeline pipeline, boolean hotMemeEnabled,
                                  WritingStyleHints styleHints, NarrativeProfile narrativeProfile,
                                  NarrativePhysicsMode narrativePhysicsMode, String narrativeCarryover,
-                                 NarrativeEngineArtifactSink artifactSink) {
+                                 NarrativeEngineArtifactSink artifactSink,
+                                 String writingStyleParamsJson) {
         log.info("【🤖 创作Agent】开始生成第{}章初稿", chapterNumber);
         long startTime = System.currentTimeMillis();
+        CognitionArcSnapshot cognitionArc = cognitionArcResolver.resolve(writingStyleParamsJson);
+        ProseCraftSnapshot proseCraft = proseCraftResolver.resolve(writingStyleParamsJson);
         String draftRules = NarrativeCraftPrompts.chapterDraftHardRules(pipeline)
                 + "\n" + NarrativeCraftPrompts.chapterReaderEngagementBlock(pipeline);
         if (isShuangwenPipeline(pipeline)) {
@@ -895,6 +912,19 @@ public class NovelGenerationAgent {
             }
         }
 
+        if (cognitionArc.enabled()) {
+            String cogBlock = NarrativeCraftPrompts.cognitionArcChapterBlock(cognitionArc);
+            if (cogBlock != null && !cogBlock.isBlank()) {
+                draftRules = draftRules + "\n\n" + cogBlock;
+            }
+        }
+        if (proseCraft.enabled()) {
+            String proseBlock = NarrativeCraftPrompts.proseCraftChapterBlock(proseCraft);
+            if (proseBlock != null && !proseBlock.isBlank()) {
+                draftRules = draftRules + "\n\n" + proseBlock;
+            }
+        }
+
         boolean skipNarrativePlanner = !narrativeTwoPhaseEnabled || !narrativeEngineEnabled || narrativeProfile == null
                 || (narrativeTwoPhaseSkipWithLightNovelPlan
                 && draftPipeline == WritingPipeline.LIGHT_NOVEL
@@ -922,7 +952,8 @@ public class NovelGenerationAgent {
                     chapterSetting,
                     immutableConstraints,
                     narrativeProfile,
-                    artifactSink);
+                    artifactSink,
+                    cognitionArc);
             if (nePlan != null && !nePlan.isBlank()) {
                 draftRules = draftRules + "\n\n" + nePlan;
             }
@@ -1199,13 +1230,19 @@ public class NovelGenerationAgent {
                                                       String chapterSetting,
                                                       String immutableConstraints,
                                                       NarrativeProfile profile,
-                                                      NarrativeEngineArtifactSink artifactSink) {
+                                                      NarrativeEngineArtifactSink artifactSink,
+                                                      CognitionArcSnapshot cognitionArc) {
         long startTime = System.currentTimeMillis();
         String outlineClip = clipForPlan(outline, NE_PLAN_OUTLINE_CLIP);
         String profileClip = clipForPlan(characterProfile, NE_PLAN_PROFILE_CLIP);
         String prevClip = clipForPlan(previousContent, NE_PLAN_PREV_CLIP);
         String immutableClip = clipForPlan(immutableConstraints, NE_PLAN_IMMUTABLE_CLIP);
         WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        String plannerEngineParams = narrativeProfileForPlannerPrompt(profile);
+        String cognitionPlanner = NarrativeCraftPrompts.cognitionArcPlannerHint(cognitionArc);
+        if (!cognitionPlanner.isBlank()) {
+            plannerEngineParams = plannerEngineParams + "\n\n" + cognitionPlanner;
+        }
         String prompt = String.format("""
                 你是网络小说叙事策划编辑。请只输出一个 JSON 对象，禁止 markdown 代码块、禁止解释前后缀。
 
@@ -1237,9 +1274,7 @@ public class NovelGenerationAgent {
                 5. closing：结尾悬念或转折一句话；禁止「下一章预告」元叙事。
                 6. mustAvoid：2～5 条短语，列出衔接材料里已交代、正文禁止再长篇复述的信息点。
                 7. reasonShort：一两句说明为何如此分配节奏（可给正文作者看）。
-                8. expectedObstacle（或 expected_obstacle）：本章须出现的一次「非最优决策、意外阻断、或须付出代价的选择」，一句话；若无请写「无」并在 reasonShort 里说明为何本章仍成立。
-                9. riskPoint（或 risk_point）：一个可能失败或节外生枝的动作节点，一句话。
-                10. delayMechanism（或 delay_mechanism）：成功或兑现为何不能一次到位、须二次尝试或补救，一句话。
+                %s
 
                 JSON 字段名必须完全一致（阻力三项可同时给出 camelCase 与 snake_case 之一即可）：
                 {
@@ -1260,10 +1295,11 @@ public class NovelGenerationAgent {
                 buildSettingBlock(novelSetting),
                 buildChapterSettingBlock(chapterSetting),
                 buildImmutableConstraintsBlock(immutableClip.isBlank() ? null : immutableClip),
-                narrativeProfileForPlannerPrompt(profile),
+                plannerEngineParams,
                 prevClip.isBlank() ? "（无：第1章或无前文）" : prevClip,
                 p.name(),
-                chapterNumber);
+                chapterNumber,
+                plannerM2ResistanceTaskLines(p));
         try {
             String raw = callAiPlanner(prompt, startTime, "叙事引擎M2章前规划");
             String formatted = formatNarrativePlannerJson(raw, p, narrativeResistanceLayerEnabled && narrativeEngineEnabled);
@@ -1285,6 +1321,22 @@ public class NovelGenerationAgent {
             }
             return "";
         }
+    }
+
+    /** M2 Planner：阻力三项任务说明；日常向允许「无冲突」章三项填「无」并由 reasonShort 兜底。 */
+    private static String plannerM2ResistanceTaskLines(WritingPipeline p) {
+        if (p == WritingPipeline.SLICE_OF_LIFE) {
+            return """
+                    8. expectedObstacle（或 expected_obstacle）：**日常向**——生活层「小别扭」（碍于面子没说清、时间不够、计划被打岔）可写一句；**纯氛围、关系沉淀、几乎无外部事件**的章可填「无」，并在 reasonShort 说明本章立意（禁止为凑数硬造狗血或危机）。
+                    9. riskPoint（或 risk_point）：轻微节外生枝即可（岔开话题、小事耽搁）；无事冲突章可填「无」。
+                    10. delayMechanism（或 delay_mechanism）：情绪或琐事导致的半步延误即可；静水章可填「无」。
+                    """;
+        }
+        return """
+                8. expectedObstacle（或 expected_obstacle）：本章须出现的一次「非最优决策、意外阻断、或须付出代价的选择」，一句话；若无请写「无」并在 reasonShort 里说明为何本章仍成立。
+                9. riskPoint（或 risk_point）：一个可能失败或节外生枝的动作节点，一句话。
+                10. delayMechanism（或 delay_mechanism）：成功或兑现为何不能一次到位、须二次尝试或补救，一句话。
+                """;
     }
 
     private String formatNarrativePlannerJson(String raw, WritingPipeline pipeline, boolean resistanceLayerEnabled) {
@@ -1377,17 +1429,20 @@ public class NovelGenerationAgent {
             }
             if (resistanceLayerEnabled) {
                 if (hasResistanceFields) {
-                    sb.append("\n【本章阻力纪律｜Planner】\n");
+                    boolean slice = p == WritingPipeline.SLICE_OF_LIFE;
+                    sb.append(slice ? "\n【本章节奏与微摩擦｜Planner】\n" : "\n【本章阻力纪律｜Planner】\n");
                     if (plannerResistanceMeaningful(obs)) {
-                        sb.append("- 预期障碍/代价选择：").append(obs).append("\n");
+                        sb.append(slice ? "- 生活层别扭/心气：" : "- 预期障碍/代价选择：").append(obs).append("\n");
                     }
                     if (plannerResistanceMeaningful(risk)) {
-                        sb.append("- 风险节点：").append(risk).append("\n");
+                        sb.append(slice ? "- 轻微波折：" : "- 风险节点：").append(risk).append("\n");
                     }
                     if (plannerResistanceMeaningful(delay)) {
-                        sb.append("- 延误/二次机制：").append(delay).append("\n");
+                        sb.append(slice ? "- 半步延误：" : "- 延误/二次机制：").append(delay).append("\n");
                     }
-                    sb.append("- 【执行】上述须在正文中有可见落地，不得口号式一笔带过；结局事实仍须服从大纲。\n");
+                    sb.append(slice
+                            ? "- 【执行】日常向以生活可信为先：有则轻轻落地，无则勿硬拧升格；结局与人物关系仍须服从大纲。\n"
+                            : "- 【执行】上述须在正文中有可见落地，不得口号式一笔带过；结局事实仍须服从大纲。\n");
                 } else {
                     sb.append("\n").append(NarrativeCraftPrompts.narrativeResistanceSoftFallback(p)).append("\n");
                 }

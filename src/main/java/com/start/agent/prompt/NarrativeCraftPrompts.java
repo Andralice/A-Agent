@@ -2,6 +2,8 @@ package com.start.agent.prompt;
 
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.model.WritingStyleHints;
+import com.start.agent.narrative.CognitionArcSnapshot;
+import com.start.agent.narrative.ProseCraftSnapshot;
 import com.start.agent.narrative.NarrativePhysicsMode;
 import com.start.agent.narrative.NarrativeProfile;
 
@@ -1174,6 +1176,16 @@ public final class NarrativeCraftPrompts {
     /** Planner 未返回专用阻力字段时，初稿仍注入的默认「摩擦」约束（按管线微调强度）。 */
     public static String narrativeResistanceSoftFallback(WritingPipeline pipeline) {
         WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
+        if (p == WritingPipeline.SLICE_OF_LIFE) {
+            return """
+                    
+                    【本章叙事摩擦｜日常向默认（Planner 未给出专用字段时）】
+                    - 本章若以氛围、关系、琐事为主、**无强外部冲突**，禁止为「凑阻力」硬造打脸、悬疑或狗血升级；允许平淡但有 **生活可信的细节与半步顿挫**。
+                    - 至少一处（择一即可）：**小事差一点到位**（忘带、耽搁、话题岔开）、**话到嘴边又咽下**、**想做的事被琐事暂时岔开再继续**——用对白或动作点到为止，禁止长篇内心说理。
+                    - 避免「全程最优旁白」：允许迟疑半拍、改口、小动作；**不必**写戏剧级二次翻盘或强行代价。
+                    - **不改变**大纲规定的本章结局与人物关系事实；静水章宁可留白与余味，也不要事件过山车。
+                    """;
+        }
         String core = """
                 
                 【本章叙事阻力｜默认（Planner 未给出专用字段时仍须遵守）】
@@ -1184,7 +1196,6 @@ public final class NarrativeCraftPrompts {
                 """;
         return switch (p) {
             case LIGHT_NOVEL -> core + "- 轻小说向：摩擦可落在社交丢脸、误会加深、赛程波折；避免血流成河式硬拧。\n";
-            case SLICE_OF_LIFE -> core + "- 日常向：摩擦落在小事僵局、说不出口的难处、一步之遥的失手。\n";
             case PERIOD_DRAMA -> core + "- 年代向：摩擦落在体面、人情、物资与规矩；少用玄学一刀翻盘。\n";
             case VULGAR -> core + "- 粗俗向：嘴上吃亏、场面难堪可作摩擦；仍要有实事推进。\n";
             default -> core + "- 爽文向：允许压制与翻盘，但翻盘须有 **步骤、代价或情报差**，禁止无病呻吟式狠话后凭空翻盘。\n";
@@ -1236,5 +1247,171 @@ public final class NarrativeCraftPrompts {
                 【过顺 / 摩擦补强（若审读意见涉及「顺滑、缺代价、缺过渡、生硬切换」须落实）】
                 在不改变章节结局事实与关键因果前提下：允许加入短暂迟疑、未一次成功的余波、场景切换处的一句感知锚点、对峙后的情绪残留；禁止为此新增核心设定或重要角色。
                 """;
+    }
+
+    /** 认知弧线：初稿约束（置于叙事引擎 M6 之后）。 */
+    public static String cognitionArcChapterBlock(CognitionArcSnapshot arc) {
+        if (!arc.enabled()) {
+            return "";
+        }
+        String beatLine = (arc.arcBeatHint() != null && !arc.arcBeatHint().isBlank())
+                ? "- 阶段节拍提示：" + arc.arcBeatHint().trim() + "\n"
+                : "";
+        return String.format("""
+                【认知弧线（全书阶段｜人物判断与代价）】
+                - 当前叙事阶段：%s（%s）
+                - 认知偏置强度（0～1，越高越易被直觉带偏）：%.2f
+                - 犹豫类型：%s
+                - 决策延迟与表现：%s
+                - 错误后果尺度：%s
+                %s- 写作约束：人物判断须体现上述偏置与犹豫类型；后果强度须与「错误后果尺度」一致，禁止无故全员降智或无故零代价。
+                """,
+                arc.phase().labelZh(),
+                arc.phase().jsonKey(),
+                arc.cognitiveBiasLevel(),
+                arc.hesitationType(),
+                arc.decisionLatencyHint(),
+                arc.errorConsequenceHint(),
+                beatLine);
+    }
+
+    /** 认知弧线：M2 Planner 对齐说明（附于叙事引擎参数之后）。 */
+    public static String cognitionArcPlannerHint(CognitionArcSnapshot arc) {
+        if (!arc.enabled()) {
+            return "";
+        }
+        String beat = (arc.arcBeatHint() != null && !arc.arcBeatHint().isBlank())
+                ? "- 若与本章节拍相关，可参考阶段提示：" + arc.arcBeatHint().trim() + "\n"
+                : "";
+        return String.format("""
+                【认知弧线对齐（Planner 须遵守）】
+                - 全书阶段：%s（%s）；偏置强度约 %.2f；犹豫类型：%s
+                - emotionArc 与 beats 中须预留至少一处「非最优判断 / 半步迟疑 / 信息不全下的选择」，与当前阶段偏置一致（勿写成全程冷静最优解）。
+                - expectedObstacle / riskPoint / delayMechanism 可与犹豫类型呼应：犹豫体现在场面（停顿、岔开话题、求证、道德两难）而非旁白说教。
+                - 后果尺度：若涉及重大误判，closing 或 beats 须指向与当前阶段匹配的代价层级（前期偏轻、后期偏重），禁止轻描淡写一笔带过。
+                %s""",
+                arc.phase().labelZh(),
+                arc.phase().jsonKey(),
+                arc.cognitiveBiasLevel(),
+                arc.hesitationType(),
+                beat);
+    }
+
+    /**
+     * 文笔四层旋钮（节奏 / 感知权重 / 词粒度 / 信息揭示）；置于认知弧线之后、Planner 之前。
+     */
+    public static String proseCraftChapterBlock(ProseCraftSnapshot snap) {
+        if (snap == null || !snap.enabled()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("【文笔旋钮（四章｜优先于堆砌修辞，次于大纲事实与合规）】\n");
+        sb.append("说明：下列数值约定在 0～1；未出现的维度沿用模型默认，不必强行凑数。\n\n");
+
+        ProseCraftSnapshot.Rhythm r = snap.rhythm();
+        if (r != null && r.present()) {
+            sb.append("1）句子节奏（呼吸感）\n");
+            lineRhythm(sb, "- 长短句落差（sentenceLengthVariance）", r.sentenceLengthVariance(),
+                    "偏低：句长较均匀，可读顺滑；中等：长短交错明显；偏高：长短落差大，戏剧停顿感强。");
+            lineRhythm(sb, "- 停顿密度（pauseDensity）", r.pauseDensity(),
+                    "偏低：信息流较连贯；中等：逗号分句、留白适中；偏高：停顿与留白多，利于悬疑或咀嚼。");
+            lineRhythm(sb, "- 碎片化（fragmentation）", r.fragmentation(),
+                    "偏低：整句为主；中等：偶尔碎句；偏高：允许断裂、省略、陡切，勿写成语法错误堆砌。");
+            sb.append("\n");
+        }
+
+        ProseCraftSnapshot.Perception p = snap.perception();
+        if (p != null && p.present()) {
+            sb.append("2）感知与镜头权重（Perceptual Focus）\n");
+            lineRhythm(sb, "- 感官画面（sensoryWeight）", p.sensoryWeight(),
+                    "偏高：光影声触味细节多；偏低：略写感官，避免氛围饱和。");
+            lineRhythm(sb, "- 概念/规则解释（conceptualWeight）", p.conceptualWeight(),
+                    "偏高：可适当交代设定逻辑；偏低：少讲设定，多用场面暗示。");
+            lineRhythm(sb, "- 外部行动推进（externalActionWeight）", p.externalActionWeight(),
+                    "偏高：人物在做、在冲突、在推进事件；偏低：行动退居次要（慎用全书长期过低）。");
+            lineRhythm(sb, "- 内心活动（internalThoughtWeight）", p.internalThoughtWeight(),
+                    "偏高：念头、犹豫、推断多写；偏低：内心收敛，多用动作与对白暗示。");
+            sb.append("- 平衡提示：若「感官+内心」明显偏高而「行动」偏低，本章须用具体事件或对话至少推进一处可见的剧情节点，避免纯感受漂移。\n\n");
+        }
+
+        ProseCraftSnapshot.Language l = snap.language();
+        if (l != null && l.present()) {
+            sb.append("3）语言颗粒度（Lexical Granularity）\n");
+            lineRhythm(sb, "- 抽象度（abstractionLevel）", l.abstractionLevel(),
+                    "偏高：概念与概括多；偏低：落地名词与具体场面多。");
+            lineRhythm(sb, "- 用词精度（wordPrecision）", l.wordPrecision(),
+                    "偏高：择词克制求准；偏低：白话直给。");
+            lineRhythm(sb, "- 形容词/修饰节制（adjectiveControl）", l.adjectiveControl(),
+                    "数值越高表示越节制：偏高：少堆砌形容词；偏低：允许更浓的装饰（仍忌陈词滥调）。");
+            lineRhythm(sb, "- 术语/知识密度（technicalDensity）", l.technicalDensity(),
+                    "偏高：专业词与机制名词可增多，须用上下文锚定；偏低：术语点到为止。");
+            sb.append("\n");
+        }
+
+        ProseCraftSnapshot.InformationFlow f = snap.informationFlow();
+        if (f != null && f.present()) {
+            sb.append("4）信息推进方式（Information Delivery）\n");
+            if (f.revealType() != null && !f.revealType().isBlank()) {
+                sb.append(revealTypeInstruction(f.revealType().trim().toLowerCase()));
+            }
+            lineRhythm(sb, "- 不确定性维持（uncertaintyMaintenance）", f.uncertaintyMaintenance(),
+                    "偏高：保留推断空间，忌作者代替读者宣判；偏低：可适当解释因果。");
+            lineRhythm(sb, "- 澄清延迟（clarityDelay）", f.clarityDelay(),
+                    "偏高：场面与动作先行，解释延后；偏低：可较早交代关键因果。");
+            sb.append("\n");
+        }
+
+        sb.append("【综合】文笔 = 信息组织 + 感知选择 + 句法节奏 + 词粒度；各项不必拉满，按本书阶段做有意识的偏置。\n");
+        return sb.toString().trim();
+    }
+
+    /**
+     * 主润色步骤（PolishingAgent.polish）注入：复用 {@link #proseCraftChapterBlock}，并强调修订不得系统性抵消旋钮取向。
+     */
+    public static String proseCraftPolishBlock(ProseCraftSnapshot snap) {
+        String core = proseCraftChapterBlock(snap);
+        if (core.isBlank()) {
+            return "";
+        }
+        return core + """
+
+                【润色阶段对齐】
+                在合规、审核意见与大纲事实前提下优化词句与局部可读性；须保持上文「文笔旋钮」的整体取向，勿为「顺滑」而把刻意长短错落、留白、分层揭示、术语密度或行动/感知配比一律抹平；若与合规冲突则以合规为准。
+                """;
+    }
+
+    private static void lineRhythm(StringBuilder sb, String label, Double v, String guide) {
+        if (v == null) {
+            return;
+        }
+        sb.append(label).append("≈").append(String.format("%.2f", v)).append("（").append(bandZh(v)).append("）— ").append(guide).append("\n");
+    }
+
+    private static String bandZh(double v) {
+        if (v < 0.35) {
+            return "偏低";
+        }
+        if (v < 0.65) {
+            return "中等";
+        }
+        return "偏高";
+    }
+
+    private static String revealTypeInstruction(String rt) {
+        String mode = switch (rt) {
+            case "immediate", "direct", "即时" -> """
+                    - 揭示策略（revealType=immediate）：允许较早把关键因果说清楚，读者理解成本低；仍避免开篇全盘说明书。
+                    """;
+            case "layered", "progressive", "分层", "渐进" -> """
+                    - 揭示策略（revealType=layered）：分层揭示，本章只兑现一层信息或一处翻转；禁止一次性抖完设定清单。
+                    """;
+            case "withheld", "held", "隐匿", "压抑" -> """
+                    - 揭示策略（revealType=withheld）：维持信息缺口与悬念，禁止过早全盘解说；用场面与线索暗示代替结论先行。
+                    """;
+            default -> """
+                    - 揭示策略（revealType=%s）：按主流长篇习惯做「场面先行、因果后置」，避免开篇整段抽象讲解。
+                    """.formatted(rt);
+        };
+        return mode;
     }
 }

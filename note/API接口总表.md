@@ -2,12 +2,15 @@
 
 本文档按当前代码整理，供前端直接对接使用。
 
-- **文档修订（2026-05-02｜晚）**：**两阶段大纲冲突图谱** `outline_graph_json` 含结构化 **`cast`**（角色表：`name`/`role`/`want`/`fear`/`knowledge`/`summary`）；**`GET /api/novel/{novelId}/outline`** 增补返回 **`outlineGraphJson`**（与实体字段同源）；**叙事引擎** 补充 **`resistance-layer-enabled`**、**`flow-pass-*`**、M8 **`tooSmooth`** 说明（§16.2.1）；**`note/push-github.ps1`** / **`note/push-github.sh`** 一键提交并推送 GitHub。
+- **文档修订（2026-05-02｜晚）**：**两阶段大纲冲突图谱** `outline_graph_json` 含结构化 **`cast`**（角色表：`name`/`role`/`want`/`fear`/`knowledge`/`summary`）；**`GET /api/novel/{novelId}/outline`** 增补返回 **`outlineGraphJson`**（与实体字段同源）；**叙事引擎** 补充 **`resistance-layer-enabled`**、**`flow-pass-*`**、M8 **`tooSmooth`** 说明（§16.2.7）；**`note/push-github.ps1`** / **`note/push-github.sh`** 一键提交并推送 GitHub。
 - **文档修订（2026-05-02）**：**「同源静态页「导演台」`/novels.html`」** 专节 + **HTTP 接口清单**（含导演台 **POST pipeline / hot-meme / writing-style-params**）；**「前端职责与常见问题（联调）」**；§1.3 **首章无 M9**；**`GET .../pipeline`** 增补 **`hotMemeEnabled`**、**`libraryPublic`**。
 - **文档修订（2026-05-03）**：与 **Electron/web-agent** 仓库 `note/前端对接需求.md` 对齐；新增 **`GET /api/novel/config/frontend-runtime`**、**`GET /api/novel/{novelId}/narrative-state`（M9）**；文末增加 **「附录：联调 JSON 样例」**。
 - **文档修订（M9 v1.1 / 导演台）**：**`narrative_state_json`** 增加 **`relationshipHints`**、**`tensionRippleHint`**、**`schemaVersion`**；**`/novels.html`** 增加 **book-meta**、**auto-continue**；附录 A.1 样例已更新。
 - **与 `web-agent/note/前端对接需求.md` 的关系（重要）**：该文件位于 **Electron/web-agent 前端仓库**，由 **前端维护**。后端 **只读、不写入** 该文件；不在该文件内追记 API 变更。联调所需的 **契约说明、字段含义、别名表、错误与 JSON 样例、运行时开关、`fromPath` 全表、M7/M9 行为** 等，一律在 **本文档** 与 **`前端与用户指引.md`** 中 **撰写与修订**；若前端备忘与本文冲突，以 **本仓库当前代码 + 本文档** 为准。后端未在每次迭代中「对照检查」前端仓库文件内容，以前述两文档为权威即可。  
 - **上手（M1～M10 + 导演台）**：[导演台与叙事功能使用说明.md](./导演台与叙事功能使用说明.md)。
+- **文档修订（2026-05-05）**：**「角色生死与后续出场」**（剧情语义｜与 HTTP 契约并列的产品预期）：见下文 **「常见问题」** 新增一行及 **「角色生死与后续出场」** 专节。
+- **文档修订（2026-05-02｜文笔与参数总表）**：**`writingStyleParams`** 存库改为 **整棵 JSON 校验后写回**（与叙事 / 认知弧线 / 文笔四层并存不丢字段）；新增 **§16.2.1～16.2.6**（文风枚举、**情绪参数 `narrative`**、**M6**、**认知弧线**、**文笔四层** 的类型、范围与前端配置说明）；**文笔旋钮**注入 **初稿 + 主润色**。
+- **文档修订（2026-05-02｜参数并存与前端须知）**：新增 **§16.2.8**（无字段级互斥校验、**M2 与轻小说章规划互斥**、**叙事引擎关闭后认知/文笔仍生效**、语义重叠与提示优先级、主润色 vs Lint/Flow/M8）。
 
 ## 基础信息
 
@@ -25,7 +28,7 @@
 - **全局异常包装 `ApiResponse`**（未在上述控制器内捕获时）:
   - 字段: `code`(数字 HTTP 语义)、`message`、`data`
   - 典型: `404` 未找到小说（含：**访客访问「仅管理员」书库时故意返回 404**，避免泄露该书存在）；`400` 参数问题；`403` 需要管理员登录（如修改书库可见性）；`500` 统一为「服务暂时不可用，请稍后重试」（详情仅服务端日志）
-- 更细的字段说明与 **`writingStyleParams` 枚举** 见同目录 **[前端与用户指引.md](./前端与用户指引.md)**。
+- **`writingStyleParams` 全书 JSON**（文风 / 情绪 `narrative` / M6 / 认知弧线 / 文笔四层）的类型、范围与前端配置：**§16.2.1～16.2.6**；**并存边界与「冲突」说明（前端必读）**：**§16.2.8**。精简备忘见 **[前端与用户指引.md](./前端与用户指引.md)**「二」。
 
 ### 同源静态页「导演台」`/novels.html`（与产品前端、AI 协作）
 
@@ -99,6 +102,21 @@
 | **`TASK_CONFLICT` 是什么？** | 章节类生成与区间锁、或与 **重新生成大纲** 等互斥；详见下文 **「`TASK_CONFLICT` 触发规则」**。 |
 | **书存在为什么访客 `GET` 小说详情是 404？** | **`libraryPublic=false`** 时访客 **不可见**，与物理不存在 **同源 404** 策略。见 §0 与 §2。 |
 | **`/novels.html` 和产品里的页面是什么关系？** | **`/novels.html`** 是 **本仓库自带的联调页**，见 **「同源静态页「导演台」`/novels.html`」**；产品界面在 **web-agent**，两边 **共用后端 API**，职责不同。 |
+| **某角色在前文剧情里死了，后文还会被写出来吗？** | **会仍有较高概率被提及或「写活」**：服务端 **没有**「角色已死亡」专用字段或 REST；`character_profile` **不随剧情自动删除**；每章仍注入 **全书角色档案** 与 **姓名锁定**（`immutableConstraints`）。事实记忆里的 **`character_state`** 只是「正文含该姓名的段落摘录」，**不理解**生死语义。姓名一致性检测按「上一章是否出现该姓名」等规则工作，**不等于**「死后禁止出场」。合理做法：在 **`POST .../continue` 等 `generationSetting`** 或 **`POST .../writing-style-params`** 备注中写明禁忌；必要时 **重生后续章** 或人工改文。详见下节。 |
+
+### 角色生死与后续出场（剧情语义｜当前实现）
+
+本节说明 **剧情层面** 行为，**不是** HTTP 路径变更。
+
+| 要点 | 说明 |
+|------|------|
+| **有无「宣告死亡」接口** | **无**。不提供单独 API 将角色标记为死亡或从生成上下文中剔除。 |
+| **角色表是否保留** | **`GET .../characters`** 与库表 **`character_profile`** 长期保留该书角色；剧情写死某人 **不会** 自动删档。 |
+| **每章生成注入什么** | 仍会带上 **完整角色设定块**、基于档案生成的 **姓名锁定**（见 **`EntityConsistencyService`**：`MUST_APPEAR_OR_EXPLAIN` / `NO_RENAME` / `ALLOW_ABSENT_NO_RENAME`）。模型始终能看到已故角色的设定摘要，除非你在本章 **`generationSetting`** 里明确约束。 |
+| **章节事实记忆** | **`GET .../chapter-facts`**、`buildFactMemory` 中的 **`character_state`**：某章若正文出现该姓名，会存一条「含姓名的段落裁切」；**不做 NLP 意义上的「死了没」判断**。回忆、悼词、他人转述仍会出现该姓名，并进入后续记忆窗口。 |
+| **一致性检测侧效应** | **`detectNameConsistencyIssue`**：若某锁定姓名在 **上一章正文** 中出现而 **本章** 解析到的姓名集合里没有，可能触发「缺失角色名」并走窄幅修订——逻辑是 **防漂移**，**不是**「死后必须缺席」。主角/女主规则更紧，配角相对松（依赖上一章是否出现）。若死亡后你希望多章完全不提姓名，一般不会由此强制「把人写回来」，但若模型为消除告警硬插一句名字，仍可能发生；以实际告警与修订提示为准。 |
+| **大纲 / cast** | **`outlineGraphJson.cast`** 与 Markdown 大纲 **不会** 因某一章剧情自动改写；重做大纲才会整体更新。 |
+| **实务建议** | 关键剧情点后用 **`generationSetting`** 写明「某某已死，后文禁止以其存活身份登场，仅允许回忆/他人提及」；严重跑偏时对后续章 **`POST .../chapters/{n}/regenerate`**；长期方案需 **产品级「角色状态机」**（当前仓库未实现）。 |
 
 ---
 
@@ -140,13 +158,13 @@
 | 路径 | 作用 | 请求体（JSON，字段均可按需省略 unless 说明必填） | 典型错误码 | 成功时关注字段 |
 |------|------|---------------------------------------------------|------------|----------------|
 | `POST /api/auth/login` | 管理员登录 | `username`、`password` | `AUTH_DISABLED`、`UNAUTHORIZED` | `token`、`role` 等（见 §0） |
-| `POST /api/novel/create` | 新建书并入队初稿引导任务 | `topic`（必填）；`generationSetting`、`hotMemeEnabled`、`writingStyleParams`（对象，可含根级字段 + **`narrative`**）、`serializationPlatform`、`creatorNote`、`outlineDetailedPrefixChapters`、`outlineMinRoadmapChapters` | `INVALID_ARGUMENT`、`CREATE_TASK_FAILED`、`TASK_CONFLICT` | `novelId`、`taskId`、`taskType` |
+| `POST /api/novel/create` | 新建书并入队初稿引导任务 | `topic`（必填）；`generationSetting`、`hotMemeEnabled`、`writingStyleParams`（对象：**§16.2.1～16.2.6** 全书 JSON）、`serializationPlatform`、`creatorNote`、`outlineDetailedPrefixChapters`、`outlineMinRoadmapChapters` | `INVALID_ARGUMENT`、`CREATE_TASK_FAILED`、`TASK_CONFLICT` | `novelId`、`taskId`、`taskType` |
 | `POST /api/novel/{novelId}/continue` | 续写单章（异步任务） | `chapterNumber`（缺省=下一空章）、`generationSetting`（本章附加设定） | `CONTINUE_TASK_FAILED`、`TASK_CONFLICT` | `taskId`、`taskType`、`targetChapter` |
 | `POST /api/novel/{novelId}/auto-continue` | 自动续写到目标章（异步） | `targetChapterCount`（全书目标章号；缺省仅补一章）、`generationSetting` | `AUTO_CONTINUE_TASK_FAILED`、`TASK_CONFLICT` | `taskId`、`taskType`、`rangeFrom`、`rangeTo` |
 | `POST /api/novel/{novelId}/chapters/{chapterNumber}/regenerate` | 单章重生（异步） | `generationSetting` | `REGENERATE_TASK_FAILED`、`TASK_CONFLICT`、`INVALID_ARGUMENT` | `taskId`、`taskType`、`targetChapter` |
 | `POST /api/novel/{novelId}/chapters/regenerate-range` | 区间重生（异步） | `startChapter`、`endChapter`（必填）、`generationSetting` | `REGENERATE_RANGE_TASK_FAILED`、`TASK_CONFLICT`、`INVALID_ARGUMENT` | `taskId`、`taskType`、`startChapter`、`endChapter` |
 | `POST /api/novel/{novelId}/outline/regenerate` | 重新生成大纲（同步，耗时可很长） | `hint`、`outlineDetailedPrefixChapters`、`outlineMinRoadmapChapters` | `OUTLINE_REGENERATE_FAILED`、`TASK_CONFLICT`、`INVALID_ARGUMENT` | `novelId` |
-| `POST /api/novel/{novelId}/writing-style-params` | 更新文风微参（仅影响后续生成） | `writingStyleParams`（对象）或 **`writingStyleParamsRaw`**（字符串）；根级可含 **`narrative`**、**`narrativePhysicsMode`**（M6）；空体表示清空 | `INVALID_STYLE_PARAMS`、`STYLE_PARAMS_UPDATE_FAILED` | `novelId`、`writingStyleParams` |
+| `POST /api/novel/{novelId}/writing-style-params` | 更新全书参数 JSON（仅影响后续生成） | `writingStyleParams`（对象）或 **`writingStyleParamsRaw`**（字符串）；根级可含 **§16.2.2～16.2.6** 所列分支（文风枚举、`narrative`、M6、认知弧线、文笔四层等）；**整树写回**；空体表示清空 | `INVALID_STYLE_PARAMS`、`STYLE_PARAMS_UPDATE_FAILED` | `novelId`、`writingStyleParams` |
 | `POST /api/novel/{novelId}/book-meta` | 连载平台 / 创作说明（不参与 AI） | `serializationPlatform`、`creatorNote`（未出现则不修改；`""` 清空） | `INVALID_ARGUMENT`、`BOOK_META_UPDATE_FAILED` | `novelId`、`serializationPlatform`、`creatorNote` |
 | `POST /api/novel/{novelId}/hot-meme` | 全书热梗开关 | `enabled`（布尔） | `HOT_MEME_UPDATE_FAILED` | `novelId`、`hotMemeEnabled` |
 | `POST /api/novel/{novelId}/pipeline` | 切换文风流水线（后续章节生效） | `pipeline`（字符串，见下「流水线字段」） | `PIPELINE_UPDATE_FAILED` | `pipeline` |
@@ -162,9 +180,9 @@
 **流水线字段 `pipeline`（`POST .../pipeline`）与 novel-style 的 `{style}`**：一律经 **`WritingPipeline.fromPath`** 解析；**完整别名表、URL 形态、`continue` 与 `pipelineHint` 语义**见上文 **「文风与流水线：HTTP URL 路径段与 `pipeline` 字符串」**。
 
 **叙事相关（M1–M4）与前端**：  
-- **读**：`GET /api/novel/{novelId}` 返回实体字段 **`narrativeCarryover`**（跨章承接摘要，可能为 `null`）、**`writingStyleParams`**（字符串 JSON，可含 **`narrative`** 对象）。  
+- **读**：`GET /api/novel/{novelId}` 返回实体字段 **`narrativeCarryover`**（跨章承接摘要，可能为 `null`）、**`writingStyleParams`**（字符串 JSON，可含 **§16.2** 所列任意受支持分支）。  
 - **写**：通过 **`POST .../writing-style-params`** 更新全书微参（含 **`narrative`**、可选 **`narrativePhysicsMode`**）；**无**单独「仅更新承接文案」的 HTTP 接口——承接由服务端在章节成功落库后维护（见 **`novel.narrative-engine.m4-carryover-enabled`**）。  
-- **服务端叙事开关**：属 `application.yml`，非 REST 写入；文档见 §16.2.1 与 **架构1.0**。  
+- **服务端叙事开关**：属 `application.yml`，非 REST 写入；文档见 **§16.2.7** 与 **架构1.0**。  
 - **M7 只读侧车**：`GET /api/novel/{novelId}/narrative-artifacts`（有数据的章列表）、`GET /api/novel/{novelId}/chapters/{chapterNumber}/narrative-artifact`（单章；无数据时 `artifact` 为 `null`）；与 **`chapter-sidecar`**（事实/衔接锚点）互补，互不替代。
 - **M9 跨章状态（可选）**：`GET /api/novel/{novelId}/narrative-state` 返回书本级 **`narrativeState`** JSON（由 **`novel.narrative-engine.m9-crosscut-enabled`** 控制是否在每章成功落库后写入 **`novel.narrative_state_json`**）；聚合 M4 承接预览、本章 sidecar、近期 `sidecar_fact`、最新 **`plot_snapshot`**，并含 **`relationshipHints`**（自 **`character_state`** 事实摘录）、**`tensionRippleHint`**（据「当前章 vs 最近阶段快照章」的规则提示）、**`schemaVersion`**（≥2 时出现深化字段），**不替代** `chapter_fact` / 快照表存储，仅只读汇总。**开启 M9 时**，生成 **第 2 章及以后** 初稿会在服务端上下文拼接 **上一章已成功落库后** 的快照摘录（`NovelAgentService` 内 `【M9 跨章叙事状态快照…】` 块，有上限字符），与 M4 承接、事实记忆等并列供模型衔接；**第 1 章初稿不注入**（无上一快照）。
 
@@ -644,7 +662,7 @@
   - `topic` (String, 必填)
   - `generationSetting` (String, 可选)
   - `hotMemeEnabled` (Boolean, 可选，默认 `false`)：全书级「少量网络热梗」；仅影响**后续**生成，宜克制开启
-  - `writingStyleParams` (Object, 可选)：文风微参 + 可选 **`narrative`** 叙事覆盖，字段说明见 [前端与用户指引.md](./前端与用户指引.md)「二」与「叙事引擎 `narrative`」；仅影响**后续**生成
+  - `writingStyleParams` (Object, 可选)：全书参数 JSON 根对象（文风枚举、**`narrative` 情绪参数**、**`narrativePhysicsMode`**、**认知弧线**、**文笔四层** 等可并存），字段类型与范围见 **§16.2.1～16.2.6**；仅影响**后续**生成
   - `serializationPlatform` (String, 可选)：连载平台，**仅展示**，不参与 AI
   - `creatorNote` (String, 可选)：创作说明（本书用途、受众、备注），**仅展示**，不参与 AI（勿与大纲正文混淆）
   - `outlineDetailedPrefixChapters` (Integer, 可选)：首次生成大纲时「开篇逐章细纲」最少章数；不传则用服务端 `novel.outline.detailed-prefix-chapters`；后端 clamp 约 **15～150**
@@ -683,13 +701,70 @@
 }
 ```
 - 说明:
-  - 空请求体或 `writingStyleParams` 传 `{}`：表示**清空**已存微参
-  - JSON 非法或不包含任何支持的字段：返回 `INVALID_STYLE_PARAMS`
+  - 空请求体或 `writingStyleParams` 传 `{}`：表示**清空**已存参数。
+  - JSON **语法非法**，或根对象**不包含任何受支持字段**（见 **§16.2.1** 表中「受支持分支」）：返回 **`INVALID_STYLE_PARAMS`**。
+  - **存库**：服务端对合法 JSON **`readTree` 校验通过后整树写回**（保留 `narrative`、认知弧线、文笔四层等与早期「仅四类文风枚举」无关的字段）。前端应 **`JSON.parse`** 详情/`pipeline` 返回的字符串 → 编辑**同一根对象** → **`JSON.stringify`** 提交；多 Tab 表单需在客户端**合并**后再 POST，避免只提交局部键导致覆盖丢失。
 - 返回: `writingStyleParams` 当前库中字符串（可能为 `null`）
 
-#### 16.2.1 叙事引擎 `writingStyleParams.narrative`（可选）
+#### 16.2.1 全书 `writingStyleParams`：受支持分支一览（前端配置入口）
 
-与文风枚举字段**并列**挂在同一 JSON 根下，例如：
+根类型：**JSON Object**（接口里常以 **字符串** 存储/传输）。下列 **任一分支**有有效内容即可通过 **`POST .../writing-style-params`** 校验（可与其它分支**叠加**）。
+
+| 分支 | 键（根级） | 类型概要 | 用途 |
+|------|------------|----------|------|
+| 文风枚举 | `styleIntensity`、`dialogueRatioHint`、`humorLevel`、`periodStrictness`（及 snake_case 别名） | string 枚举 | 对白占比、幽默、年代考究、叙事张扬度等「标签式」微调 |
+| 叙事引擎·情绪 | **`narrative`**（对象） | 见 **§16.2.3** | 情绪类型、强度带宽 **\[0,1\]**、压抑度、禁止短语、节奏/材质/视角hint、轻小说三维等 |
+| 叙事物理 M6 | **`narrativePhysicsMode`** | string | 连续微扰 vs 压力阈值分桶，见 **§16.2.4** |
+| 认知弧线 | **`narrativeArcPhase`**、**`cognitionArc`** | string + object | 全书阶段与人物判断/代价取向，见 **§16.2.5** |
+| 文笔四层 | **`rhythm`**、**`perception`**、**`language`**、**`informationFlow`**（或 `information_flow`） | object | 句法节奏、感知权重、词粒度、信息揭示策略，见 **§16.2.6** |
+
+**前端建议**：详情页 / 导演台用 **Tab 或折叠面板** 对应上表五类，共用内存中的 **一个** `writingStyleParams` 对象；保存前深合并（若分模块编辑）或始终读写完整对象。**各分支同时存在时是否「打架」、运维关叙事引擎后哪些仍生效**：见 **§16.2.8**。
+
+---
+
+#### 16.2.2 文风枚举参数（根级）
+
+与叙事参数**并列**于同一 JSON 根下；字段均可缺省。
+
+| 字段 | 类型 | 取值（大小写不敏感） | 含义 |
+|------|------|----------------------|------|
+| `styleIntensity` | string | `mild` \| `balanced` \| `bold` | 叙事外放程度：克制 / 平衡 / 更狠 |
+| `dialogueRatioHint` | string | `low` \| `medium` \| `high` | 对白占比倾向 |
+| `humorLevel` | string | `low` \| `medium` \| `high` | 幽默与打趣程度 |
+| `periodStrictness` | string | `loose` \| `normal` \| `strict` | 年代细节严苛度（年代文最有用） |
+
+**别名（根级 snake_case）**：`style_intensity`、`dialogue_ratio_hint`、`humor_level`、`period_strictness`。
+
+**生效**：大纲/角色/初稿「用户文风微调」块；**主润色**阶段再次拼接同类说明。
+
+---
+
+#### 16.2.3 叙事引擎·情绪与带宽（根对象下的 **`narrative`** 对象）
+
+**类型**：JSON Object。与 **`writingPipeline` 默认 Narrative Profile** 合并：**仅覆盖出现的键**；**`forbidden`**（字符串数组）与管线默认禁止项 **叠加去重**。
+
+| 字段 | 类型 | 范围 / 约束 | 说明 |
+|------|------|-------------|------|
+| `emotionType` | string | 自由文本 | 情绪类型标签（如「克制对峙」） |
+| `intensityMin` | number | **\[0, 1\]** | 情绪强度带宽下限（服务端 clamp） |
+| `intensityMax` | number | **\[0, 1\]** | 情绪强度带宽上限；若小于 min 会交换 |
+| `suppression` | number | **\[0, 1\]** | 压抑度 |
+| `triggerFact` | string | 自由文本 | 触发锚点（事实短描述） |
+| `forbidden` | string[] | 每项非空字符串 | 禁止出现的短语（子串级 Lint 与提示共用） |
+| `rhythmHint` | string | 自由文本 | 本章节奏意图 |
+| `textureHint` | string | 自由文本 | 语言材质意图 |
+| `povHint` | string | 自由文本 | 视角/镜头意图 |
+| `affection` | number | **\[0, 1\]**（可选） | 轻小说向：亲昵维 |
+| `awkwardness` | number | **\[0, 1\]**（可选） | 轻小说向：尴尬维 |
+| `assertiveness` | number | **\[0, 1\]**（可选） | 轻小说向：强硬维 |
+| `interactionFocus` | string | 自由文本 | 互动写法焦点 |
+| `readerInferenceRule` | boolean | `true` / `false` | 是否强调推断、减少标签情绪句 |
+
+**命名**：除上表 camelCase 外，下列 **snake_case** 等价：`emotion_type`、`intensity_min`、`intensity_max`、`trigger_fact`、`rhythm_hint`、`texture_hint`、`pov_hint`、`interaction_focus`、`reader_inference_rule`。数值字段也可由 **数字字符串** 解析（与 JSON number 等价）。
+
+**生效**：需 **`novel.narrative-engine.enabled=true`** 且有合并后的 Profile；注入 **初稿 / 润色 / 终稿去 AI 味** 及 M5/M6 等相关块（详见 **§16.2.7**）。
+
+**示例**（根级可与文风枚举、M6、文笔等并列）：
 
 ```json
 {
@@ -714,12 +789,156 @@
 }
 ```
 
-- **合并规则**：缺省字段用当前 **`writingPipeline` 管线默认值** 补齐；`forbidden` 与管线默认**叠加**（去重）。
-- **生效范围**：章节初稿、润色、终稿去 AI 味均会参考合并后的叙事配置（见服务端 `novel.narrative-engine.enabled`）。
-- **M2 章前 Planner**（**服务端配置**，非本 JSON 字段）：`novel.narrative-engine.two-phase-enabled: true` 时，在初稿前多一次模型调用生成「叙事脚本」再写作；**解析失败或调用失败时静默回退为仅 M1**。轻小说且已开启 `novel.light-novel.chapter-planning-enabled` 时，默认**跳过**叙事 Planner（`novel.narrative-engine.two-phase-skip-with-light-novel-plan`，避免两套节拍冲突）。
-- **可调服务端键**（`application.yml`）：`novel.narrative-engine.enabled`、`two-phase-enabled`、`two-phase-skip-with-light-novel-plan`、`planner-temperature`、`planner-max-tokens`；**M3**：`lint-enabled`、`lint-fix-enabled`、`lint-fix-temperature`、`lint-fix-max-tokens`（终稿后扫描禁止短语与标签句，命中可选窄幅修订）；**M4**：`m4-carryover-enabled`（跨章承接：书本字段 `narrativeCarryover` 在章节成功落库后更新，并注入下一章初稿；关闭则不更新、不注入）；**M7**：`m7-artifact-enabled`（为 `true` 且 **`enabled` 为 `true`** 时，章节成功落库写入 `Chapter.narrativeEngineArtifact`，并可通过 **§12.1 / §12.2** 只读拉取）；**M8**（仓库默认开，可改 `false` 省调用）：`m8-critic-enabled`、`m8-rewrite-enabled`、`m8-critic-temperature`、`m8-critic-max-tokens`、`m8-rewrite-temperature`、`m8-rewrite-max-tokens`、`m8-rewrite-min-severity`（`low`/`medium`/`high`，侧车 JSON 内 `critic` 块）；批评 JSON 可选顶层 **`tooSmooth`** / **`too_smooth`**（「过顺」标记，配合重写路径）；**M9**（仓库默认开）：`m9-crosscut-enabled`（为 `true` 时每章成功落库后更新 **`novel.narrative_state_json`**，**§1.3** `GET .../narrative-state`）。**叙事阻力层 / 流体**：`resistance-layer-enabled`、`flow-pass-enabled`、`flow-pass-temperature`、`flow-pass-max-tokens`（终稿去 AI 味后、Lint 前的窄幅润滑 Pass；无单独 REST）。
-- **M6｜`narrativePhysicsMode`（可选，与 `narrative` 并列挂在 JSON 根下）**：覆盖「叙事物理引擎」分桶；缺省时 **`LIGHT_NOVEL` / `SLICE_OF_LIFE` → 连续微扰 `continuous`**，**其余管线 → 压力阈值 `stress`**。前端可传字符串（大小写不敏感），别名示例：**连续微扰**：`continuous`、`micro`、`daily`、`日常`、`连续`；**压力阈值**：`stress`、`threshold`、`burst`、`压力`、`阈值`。服务端将其映射为内部枚举并注入初稿/润色/终稿提示词。
+---
+
+#### 16.2.4 叙事物理 M6（根级 **`narrativePhysicsMode`**）
+
+| 字段 | 类型 | 取值 | 说明 |
+|------|------|------|------|
+| `narrativePhysicsMode` | string | 见下文别名（大小写不敏感） | 覆盖「叙事物理」分桶；缺省时 **轻小说/日常 → 连续微扰**，**其余管线 → 压力阈值** |
+
+**连续微扰** 别名：`continuous`、`micro`、`daily`、`日常`、`连续`。  
+**压力阈值** 别名：`stress`、`threshold`、`burst`、`压力`、`阈值`。
+
+**生效**：初稿 M6 块；润色/终稿单行提醒（依赖叙事引擎开启）。
+
+---
+
+#### 16.2.5 认知弧线（根级 **`narrativeArcPhase`** + **`cognitionArc`**）
+
+用于全书阶段下的人物判断、犹豫类型与错误代价尺度（提示词约束，非 Lint 字段）。
+
+| 字段 | 类型 | 范围 / 枚举 | 说明 |
+|------|------|-------------|------|
+| `narrativeArcPhase` | string | `early` / `mid` / `late`（及 `前期`/`中期`/`后期`等别名） | 选用哪一阶段默认表或 `byPhase` 桶 |
+| `cognitionArc` | object | 可选内嵌 **`byPhase`**：`{ "early": {...}, "mid": {...}, "late": {...} }` | 覆盖默认；扁平字段与 `byPhase` 当前阶段切片合并 |
+
+**`cognitionArc` 内常用字段**（均可选；数值 **\[0, 1\]**）：`cognitiveBiasLevel`、`hesitationType`（string）、`decisionLatencyHint`、`errorConsequenceHint`、`arcBeatHint`。支持 snake_case。
+
+**启用规则**：仅有合法 **`narrativeArcPhase`** 而无 `cognitionArc` 时使用**内置阶段默认**；两者皆无则**不注入**。仅有 **`cognitionArc` 而无阶段** 时默认阶段为 **`early`**（仅合并 `byPhase.early` —— 写中后期请**务必**设 `narrativeArcPhase`）。
+
+**别名**：`narrative_arc_phase`、`cognition_arc`、`by_phase`。
+
+**生效**：初稿认知块；**M2 Planner** 附加「认知弧线对齐」说明（Planner 开启且运行时）。
+
+---
+
+#### 16.2.6 文笔四层旋钮（根级四个对象）
+
+控制「信息组织 + 感知选择 + 句法节奏 + 词粒度」（与 **`narrative` 情绪带宽** 正交）。四个对象均可缺省；**某一对象内至少有一个合法数值或 `revealType` 文本** 即启用对应层。
+
+**通用**：下列 **0～1** 旋钮均为 **number**，服务端 **clamp 到 \[0,1\]**；键名支持 **snake_case**（表中仅列 camelCase）。
+
+**① `rhythm`（句子节奏）**
+
+| 字段 | 类型 | 范围 | 含义（语义） |
+|------|------|------|----------------|
+| `sentenceLengthVariance` | number | \[0, 1\] | 长短句落差 / 「呼吸感」 |
+| `pauseDensity` | number | \[0, 1\] | 停顿、留白密度 |
+| `fragmentation` | number | \[0, 1\] | 碎片句、断裂感 |
+
+**② `perception`（感知与镜头权重）**
+
+| 字段 | 类型 | 范围 | 含义 |
+|------|------|------|------|
+| `sensoryWeight` | number | \[0, 1\] | 感官画面比重 |
+| `conceptualWeight` | number | \[0, 1\] | 概念/规则解释比重 |
+| `externalActionWeight` | number | \[0, 1\] | 外部行动推进比重 |
+| `internalThoughtWeight` | number | \[0, 1\] | 内心活动比重 |
+
+**③ `language`（语言颗粒度）**
+
+| 字段 | 类型 | 范围 | 含义 |
+|------|------|------|------|
+| `abstractionLevel` | number | \[0, 1\] | 抽象 vs 具象 |
+| `wordPrecision` | number | \[0, 1\] | 择词精度 |
+| `adjectiveControl` | number | \[0, 1\] | 形容词节制（高 = 更节制） |
+| `adjectiveDensity` | number | \[0, 1\] | 与 `adjectiveControl` **二选一**（别名含义）；二者均出现时优先读 `adjectiveControl` |
+| `technicalDensity` | number | \[0, 1\] | 术语/知识密度 |
+
+**④ `informationFlow`（信息揭示）**（对象键亦可为 **`information_flow`**）
+
+| 字段 | 类型 | 范围 / 枚举 | 含义 |
+|------|------|-------------|------|
+| `revealType` | string | 建议 `immediate`、`layered`、`withheld`（及中文如 `即时`/`分层` 等扩展） | 直接揭示 / 分层揭示 / 长期隐匿 |
+| `uncertaintyMaintenance` | number | \[0, 1\] | 维持推断空间、避免作者代读者宣判 |
+| `clarityDelay` | number | \[0, 1\] | 澄清延后：场面先行 vs 早解释 |
+
+**生效**：初稿「文笔旋钮」提示块；**主润色**（步骤 4 `PolishingAgent.polish`）再次注入**同款说明 + 「润色阶段对齐」**（避免为顺滑抹平 deliberate 取向）。Lint/Flow/M8 等窄幅 pass **不重复**注入全文块。
+
+**示例**：
+
+```json
+{
+  "rhythm": { "sentenceLengthVariance": 0.6, "fragmentation": 0.4 },
+  "perception": { "sensoryWeight": 0.8, "internalThoughtWeight": 0.7, "externalActionWeight": 0.3 },
+  "language": { "abstractionLevel": 0.6, "technicalDensity": 0.7, "adjectiveControl": 0.3 },
+  "informationFlow": { "revealType": "layered", "uncertaintyMaintenance": 0.7 }
+}
+```
+
+---
+
+#### 16.2.7 服务端叙事开关与里程碑（`application.yml`，非 REST）
+
+以下为运维/后端配置，前端只需知晓「关闭则对应能力不注入」。
+
+- **合并规则（`narrative`）**：缺省字段用当前 **`writingPipeline` 管线默认值** 补齐；`forbidden` 与管线默认**叠加**（去重）。
+- **生效范围（叙事引擎）**：章节初稿、润色、终稿去 AI 味均参考合并后的叙事配置（见 **`novel.narrative-engine.enabled`**）。
+- **M2 章前 Planner**：`novel.narrative-engine.two-phase-enabled: true` 时，初稿前多一次模型调用生成「叙事脚本」；失败静默回退。轻小说且 **`novel.light-novel.chapter-planning-enabled`** 时默认 **跳过** 叙事 Planner（`novel.narrative-engine.two-phase-skip-with-light-novel-plan`）。
+- **可调服务端键（节选）**：`novel.narrative-engine.enabled`、`two-phase-enabled`、`two-phase-skip-with-light-novel-plan`、`planner-temperature`、`planner-max-tokens`；**M3**：`lint-enabled`、`lint-fix-enabled`、`lint-fix-temperature`、`lint-fix-max-tokens`；**M4**：`m4-carryover-enabled`；**M7**：`m7-artifact-enabled`（且需 `enabled`）；**M8**：`m8-critic-enabled`、`m8-rewrite-enabled`、`m8-critic-temperature`、`m8-critic-max-tokens`、`m8-rewrite-temperature`、`m8-rewrite-max-tokens`、`m8-rewrite-min-severity`；批评 JSON 可选 **`tooSmooth`** / **`too_smooth`**；**M9**：`m9-crosscut-enabled`。**阻力层 / 流体**：`resistance-layer-enabled`、`flow-pass-enabled`、`flow-pass-temperature`、`flow-pass-max-tokens`。
 - **M5**：情绪波形与管线句法力学由服务端提示词注入（无单独 REST 字段）；依赖叙事引擎总开关。
+
+#### 16.2.8 参数并存、边界与前端须知（「冲突」与优先级）
+
+本节说明：**JSON 内多类参数能否同时保存**（能）、**后端是否校验语义矛盾**（否）、以及**与运维开关、管线提示叠加时前端应如何理解**，避免产品与联调误解。
+
+##### （1）不存在「字段级互斥」校验
+
+- 根对象可同时包含：**文风枚举**、**`narrative`**、**`narrativePhysicsMode`**、**认知弧线**、**文笔四层** 等；服务端 **不会** 因「例如 `rhythm` 与 `rhythmHint` 语义不一致」而返回错误。
+- **`INVALID_STYLE_PARAMS`** 仅表示：JSON **语法非法**，或根对象 **不包含 §16.2.1 所列任一分支的有效内容**（见 §16.2、附录 E）。**不表示**用户配置的旋钮组合是否「推荐」。
+
+##### （2）服务端强制 **二选一**（与本书 JSON 无关）
+
+| 能力 A | 能力 B | 行为 |
+|--------|--------|------|
+| **M2 叙事 Planner**（`novel.narrative-engine.two-phase-enabled`） | **轻小说章前节拍规划**（`novel.light-novel.chapter-planning-enabled`，且本书 **`writingPipeline` 为轻小说**） | 默认 **不跑 M2**，避免两套章前节拍重复、双倍调用；由 **`novel.narrative-engine.two-phase-skip-with-light-novel-plan`** 控制（默认一般为 `true`）。 |
+
+**前端须知**：导演台若看到「叙事 Planner 跳过」，可能是上述互斥而非用户 JSON 错误；可在 **`GET .../config/frontend-runtime`** 或运维文档确认 yml。
+
+##### （3）叙事引擎总闸关闭后：**`narrative` 不注入，认知弧线与文笔仍注入**
+
+当运维将 **`novel.narrative-engine.enabled`** 设为 **`false`** 时（非本书 JSON；前端用 **`GET /api/novel/config/frontend-runtime`** 返回的 **`narrativeEngineEnabled`** 与 UI 对齐）：
+
+| 本书 `writingStyleParams` 内容 | 章节生成侧典型行为 |
+|--------------------------------|-------------------|
+| **`narrative` 对象** | **不参与**合并 Profile；初稿 **无** M1/M5/M6 叙事引擎块，**无** M2 Planner，**无** 依赖 Profile 的 Lint/Flow/M8 叙事链路等 |
+| **`narrativeArcPhase` / `cognitionArc`** | **仍会**解析并注入初稿（及 M2 若单独不可能运行则无 Planner 对齐段） |
+| **`rhythm` / `perception` / `language` / `informationFlow`** | **仍会**注入初稿与 **主润色**（`PolishingAgent.polish`） |
+
+**前端须知**：勿向用户传达「关掉叙事引擎 = 本书所有 `writingStyleParams` 高级选项全部失效」——**认知弧线**与**文笔四层**仍可能生效；若产品希望「引擎关则表单一并灰显」，请根据 **`narrativeEngineEnabled`**（见 **`GET .../frontend-runtime`**）联动禁用 **`narrative` / M6 / 认知弧线 / 文笔** 等 Tab（是否一并禁用认知与文笔由产品设计决定，本节仅陈述后端实际注入行为）。
+
+##### （4）语义重叠（软拉扯）：未报错，但模型需折中
+
+以下属 **同一美学维度多段提示** 叠加，可能使模型在「节奏 / 情绪 / 推进感」之间取舍；建议前端表单 **同一维度尽量单一数据源**（例如节奏以 **`rhythm` 数值**为准，`rhythmHint` 仅作补充说明且勿矛盾）。
+
+| 重叠维度 | 可能叠加的来源 |
+|----------|----------------|
+| **句法节奏** | `narrative.rhythmHint`（自由文案）与 **`rhythm`** 对象（`sentenceLengthVariance` 等） |
+| **情绪 vs 判断** | **`narrative`**（强度带宽、压抑度等）与 **认知弧线**（阶段偏置、犹豫类型、代价尺度） |
+| **推进感** | **`writingPipeline` 固定块**（如爽文「一章一事起落」）与 **`perception.externalActionWeight` 过低**；文笔块内已有平衡提示，仍属软约束 |
+| **信息节奏** | **`informationFlow.revealType`** 与管线/大纲对「一章揭露量」的习惯 |
+
+##### （5）提示优先级（便于前端写 Tooltip）
+
+合并进模型上下文的多块约束中，文案层面的一般原则是：**大纲事实与合规 > 本书 immutable / 审核结果 > 管线硬约束 > 文风枚举与叙事/文笔等微调**。文笔块内亦写明次于大纲与合规。**没有任何 REST 字段可让前端「覆盖」大纲正文事实**。
+
+##### （6）主润色 vs 后续窄幅 Pass
+
+- **文笔四层**：注入 **初稿** + **主润色**（全文润色一步）。
+- **M3 Lint 修订 / Flow 润滑 / M8 批评重写** 等 **窄幅** pass **通常不再附带**整段文笔旋钮全文；理论上存在「后续 Pass 略抹平刻意断裂/留白」的轻微风险，一般弱于主润色约束。
+
+---
 
 #### 16.3 更新书籍备注（连载平台 / 创作说明）
 
@@ -1001,7 +1220,7 @@
 | 写作监控（推荐） | `GET /api/novel/{novelId}/writing-monitor` | 聚合 DB 任务 + 内存区间锁 + 非 READY 章节；适合详情页「生成中」横幅与禁用按钮逻辑。 |
 | 进度摘要 | `GET /api/novel/{novelId}/progress` | `chapterCount`、`outlineReady`、`charactersReady`、`failedCount`、工作台字段。 |
 | 创建页默认 | `GET /api/novel/config/outline-plan-defaults` | 表单默认与 clamp 区间。 |
-| 运行时配置快照 | `GET /api/novel/config/frontend-runtime` | `securityEnabled`、`jwtExpirationMs`、自动续写上下限、大纲 clamp、M7 开关等（与 yml 一致）。 |
+| 运行时配置快照 | `GET /api/novel/config/frontend-runtime` | `securityEnabled`、`jwtExpirationMs`、自动续写上下限、大纲 clamp、**`narrativeEngineEnabled`**、M7/M9、两阶段大纲等（与 yml 一致）；**§16.2.8** 依赖 **`narrativeEngineEnabled`** 解释叙事参数是否注入。 |
 
 ### 4.3 异步生成：轮询策略建议
 
@@ -1014,9 +1233,9 @@
 ### 4.4 文风与叙事参数（前端表单）
 
 - **全书流水线**：`POST /api/novel/{novelId}/pipeline`，Body `{"pipeline":"<字符串>"}`。字符串语义为 **HTTP/API 路径级别名**，与 **`/api/novel-style/{style}/...`** 的 `{style}` 共用 **`fromPath`** 规则；**完整列表**见文首 **「文风与流水线」** 一节（推荐 `power-fantasy`、`light-novel` 等 kebab-case）。
-- **文风微参 + 叙事 JSON**：`POST .../writing-style-params`，在 **`writingStyleParams` 对象** 根级可同时包含：`dialogueRatioHint`、`humorLevel`、`periodStrictness`、**`narrative`** 对象、**`narrativePhysicsMode`**（M6）等；或使用 **`writingStyleParamsRaw`** 传整段 JSON 字符串。
+- **全书参数 JSON**：`POST .../writing-style-params`，根对象可同时包含：**文风枚举**（§16.2.2）、**`narrative` 情绪参数**（§16.2.3）、**`narrativePhysicsMode`**（§16.2.4）、**认知弧线**（§16.2.5）、**文笔四层**（§16.2.6）；或使用 **`writingStyleParamsRaw`** 传整段 JSON 字符串。校验与存库规则见 **§16.2** / **§16.2.1**。**并存与运维边界（叙事引擎关闭后谁仍生效等）**：**§16.2.8**。
 - **只读展示**：详情 / pipeline 接口返回的 **`writingStyleParams`** 为字符串，前端需 **`JSON.parse`** 后再渲染表单；**`narrativeCarryover`** 仅展示或折叠调试，**无 PATCH 接口**，由服务端章节成功后维护。
-- **叙事引擎服务端开关**：`novel.narrative-engine.enabled` 等为运维配置，前端只需知悉「关闭则后端不注入叙事块」；详见 **§16.2.1**。
+- **叙事引擎服务端开关**：`novel.narrative-engine.enabled` 等为运维配置，前端只需知悉「关闭则后端不注入叙事块」；详见 **§16.2.7**。
 
 ### 4.5 页面模块与接口映射（建议）
 
@@ -1038,6 +1257,7 @@
 
 ### 4.6 当前能力与限制（避免误期望）
 
+- **角色生死**：服务端 **不维护**「存活/死亡」状态机；已故角色 **仍保留在档案与锁定列表中**，后续章 **仍可能被模型写出**（含错误「复活」）。约束依赖 **`generationSetting`**、重生章节或人工修订；详见上文 **「角色生死与后续出场」**。
 - **章节正文流式 SSE/WebSocket**：当前 HTTP **无** SSE；生成走 **异步任务 + 轮询**。若需流式需另行产品设计。
 - **前端内置参考**：同源 **`/novels.html`** 见 **「同源静态页「导演台」`/novels.html`」**；含列表、登录、创建、删除守卫、**`frontend-runtime`**、导演台 **GET 聚合**、**POST pipeline / hot-meme / writing-style-params / book-meta / continue / auto-continue**、任务 **cancel/kick/retry**，可作联调对照（非唯一前端实现）。
 - **QQ 模块**：`/api/qq/*` 多为机器人侧；一体化 Vue 控制台可不接。
@@ -1276,6 +1496,8 @@
   "message": "writingStyleParams 不是合法 JSON 或不包含支持的字段"
 }
 ```
+
+> 常见原因：Body 非 JSON、根不是 Object、或根对象 **不含 §16.2.1「受支持分支」中任意一类有效内容**（例如仅传 `{}`、或仅含未识别键）。
 
 ### F. 访客访问 `libraryPublic=false` 的书（`GET /api/novel/{id}`）
 

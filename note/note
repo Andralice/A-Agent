@@ -10,3 +10,5 @@ $env:OPENAI_API_KEY='sk-WzQMkepAo1qJKub5IAzbVxTXPupYW7HVtBlxw4AlyhsRqYDk'
 $env:OPENAI_BASE_URL='https://api.meai.cloud'
 mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 .\note\deploy.ps1
+
+.\note\push-github.ps1 -Message "常规更新 2026 5 5"

@@ -46,7 +46,8 @@ public class Novel {
     private boolean hotMemeEnabled = false;
 
     /**
-     * 可选文风微参 JSON，对应 {@link com.start.agent.model.WritingStyleHints}；缺省表示不按微参追加提示。
+     * 可选全书参数 JSON：{@link com.start.agent.model.WritingStyleHints}、{@code narrative}、{@code cognitionArc}、
+     * 文笔四层 {@code rhythm}/{@code perception}/{@code language}/{@code informationFlow} 等可并存；缺省或无效则不追加对应提示。
      */
     @Column(name = "writing_style_params", columnDefinition = "TEXT")
     private String writingStyleParams;

@@ -14,6 +14,7 @@ import com.start.agent.model.NovelWritePhase;
 import com.start.agent.model.PlotSnapshot;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.model.WritingStyleHints;
+import com.start.agent.model.WritingStyleParamsSupport;
 import com.start.agent.narrative.NarrativeEngineArtifactSink;
 import com.start.agent.narrative.NarrativePhysicsMode;
 import com.start.agent.narrative.NarrativeProfile;
@@ -593,7 +594,8 @@ public class NovelAgentService {
                 narrativeProfile,
                 narrativePhysicsMode,
                 carryoverForPrompt,
-                artifactSink
+                artifactSink,
+                novel.getWritingStyleParams()
         );
         if (content == null || content.trim().isEmpty()) throw new RuntimeException("AI生成失败：返回内容为空");
         String issueHint = entityConsistencyService.detectNameConsistencyIssue(previousContentFull, content, lockRules);
@@ -932,18 +934,24 @@ public class NovelAgentService {
         return WritingStyleHints.parseNullable(novel.getWritingStyleParams(), objectMapper);
     }
 
-    /** 校验并压缩为可存库的 JSON；无效或空对象返回 null。 */
+    /** 校验根 JSON 并整树落库，保留 narrative / cognition / 文笔四层等与 {@link WritingStyleHints} 并存字段。 */
     private String normalizeWritingStyleParamsJson(String raw) {
-        if (raw == null || raw.isBlank()) return null;
-        WritingStyleHints h = WritingStyleHints.parseNullable(raw, objectMapper);
-        if (h == null) {
-            log.warn("writingStyleParams 已忽略（解析失败或无可识别字段）");
+        if (raw == null || raw.isBlank()) {
             return null;
         }
         try {
-            return objectMapper.writeValueAsString(h);
+            JsonNode root = objectMapper.readTree(raw.trim());
+            if (!root.isObject()) {
+                log.warn("writingStyleParams 已忽略（非 JSON 对象）");
+                return null;
+            }
+            if (!WritingStyleParamsSupport.hasSupportedWritingStyleParams(root)) {
+                log.warn("writingStyleParams 已忽略（无可识别字段）");
+                return null;
+            }
+            return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
-            log.warn("writingStyleParams 序列化失败", e);
+            log.warn("writingStyleParams 解析失败: {}", e.getMessage());
             return null;
         }
     }

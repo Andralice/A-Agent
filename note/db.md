@@ -44,7 +44,7 @@
 | `generation_setting` | `generationSetting` | `TEXT`，用户补充设定 |
 | `writing_pipeline` | `writingPipeline` | `varchar(40)`，见 §4 `WritingPipeline` |
 | `hot_meme_enabled` | `hotMemeEnabled` | `tinyint(1) NOT NULL DEFAULT 0`，全书「少量网络热梗」开关；仅影响后续生成 |
-| `writing_style_params` | `writingStyleParams` | `TEXT` 可空，JSON：`WritingStyleHints`（文风微参）；仅影响后续生成 |
+| `writing_style_params` | `writingStyleParams` | `TEXT` 可空，JSON 根对象（文风枚举、`narrative`、M6、认知弧线、文笔四层等，见 **API接口总表 §16.2**）；仅影响后续生成 |
 | `serialization_platform` | `serializationPlatform` | `varchar(200)` 可空，连载平台（展示用，不参与生成） |
 | `creator_note` | `creatorNote` | `TEXT` 可空，创作说明/本书用途（展示用，不参与生成） |
 | `user_id` | `userId` | 可空 |
