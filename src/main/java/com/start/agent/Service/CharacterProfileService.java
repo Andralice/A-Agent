@@ -252,14 +252,15 @@ public class CharacterProfileService {
                 String fear = sanitizeProfileContent(node.path("fear").asText(""));
                 String knowledge = sanitizeProfileContent(node.path("knowledge").asText(""));
                 String summary = sanitizeProfileContent(node.path("summary").asText(""));
+                String voice = sanitizeProfileContent(node.path("voice").asText(""));
                 if (!isLikelyCharacterName(name)) continue;
-                if (summary.isBlank() && want.isBlank() && fear.isBlank() && knowledge.isBlank()) continue;
+                if (summary.isBlank() && want.isBlank() && fear.isBlank() && knowledge.isBlank() && voice.isBlank()) continue;
 
                 CharacterProfile profile = new CharacterProfile();
                 profile.setNovelId(novelId);
                 profile.setCharacterName(name);
                 profile.setCharacterType(type);
-                profile.setProfileContent(buildStructuredProfileContent(summary, want, fear, knowledge, node));
+                profile.setProfileContent(buildStructuredProfileContent(summary, want, fear, knowledge, voice, node));
                 profiles.add(profile);
             }
         } catch (Exception e) {
@@ -327,12 +328,13 @@ public class CharacterProfileService {
         return content;
     }
 
-    private String buildStructuredProfileContent(String summary, String want, String fear, String knowledge, JsonNode rawNode) {
+    private String buildStructuredProfileContent(String summary, String want, String fear, String knowledge, String voice, JsonNode rawNode) {
         StringBuilder builder = new StringBuilder();
         if (!summary.isBlank()) builder.append("简介: ").append(summary).append("\n");
         if (!want.isBlank()) builder.append("目标: ").append(want).append("\n");
         if (!fear.isBlank()) builder.append("恐惧: ").append(fear).append("\n");
         if (!knowledge.isBlank()) builder.append("信息差: ").append(knowledge).append("\n");
+        if (!voice.isBlank()) builder.append("对白声纹: ").append(voice).append("\n");
         if (builder.isEmpty()) {
             builder.append(sanitizeProfileContent(rawNode.toPrettyString()));
         }

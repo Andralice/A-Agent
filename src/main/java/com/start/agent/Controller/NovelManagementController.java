@@ -8,6 +8,7 @@ import com.start.agent.model.ConsistencyAlert;
 import com.start.agent.model.GenerationLog;
 import com.start.agent.model.GenerationTask;
 import com.start.agent.model.Novel;
+import com.start.agent.model.NovelCharacterState;
 import com.start.agent.model.NovelWritePhase;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.repository.ChapterFactRepository;
@@ -17,6 +18,7 @@ import com.start.agent.repository.GenerationLogRepository;
 import com.start.agent.repository.GenerationTaskRepository;
 import com.start.agent.repository.NovelRepository;
 import com.start.agent.repository.PlotSnapshotRepository;
+import com.start.agent.service.CharacterNarrativeStateService;
 import com.start.agent.service.NovelAgentService;
 import com.start.agent.service.NovelDeletionService;
 import com.start.agent.service.NovelExportService;
@@ -61,6 +63,7 @@ public class NovelManagementController {
     @Autowired private GenerationTaskRepository generationTaskRepository;
     @Autowired private NovelDeletionService novelDeletionService;
     @Autowired private NovelLibraryAccessService novelLibraryAccessService;
+    @Autowired private CharacterNarrativeStateService characterNarrativeStateService;
 
     private void guardRead(Long novelId) {
         novelLibraryAccessService.assertCanRead(novelId);
@@ -388,6 +391,14 @@ public class NovelManagementController {
         guardRead(novelId);
         log.info("【API请求】获取小说 {} 的跨章叙事状态 M9", novelId);
         return agentService.getNarrativeStateForNovel(novelId);
+    }
+
+    /** 书本级角色动态状态（叙事调度闭环）；无数据时返回空数组。 */
+    @GetMapping("/{novelId}/character-narrative-states")
+    public List<NovelCharacterState> listCharacterNarrativeStates(@PathVariable Long novelId) {
+        guardRead(novelId);
+        log.info("【API请求】获取小说 {} 的角色动态状态列表", novelId);
+        return characterNarrativeStateService.listStates(novelId);
     }
 
     @GetMapping("/{novelId}/plot-snapshots")

@@ -10,7 +10,15 @@ import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 文笔润色 Agent：在合规前提下优化行文节奏与可读性，并按流水线切换文风提示。
@@ -20,10 +28,28 @@ import org.springframework.stereotype.Component;
 public class PolishingAgent {
 
     private final ChatClient chatClient;
+    private final boolean polishDebugDumpEnabled;
+    private final String polishDebugDumpDir;
+    private final int polishMaxAttempts;
+    private final long polishRetryDelayMs;
+    private final int polishMaxTokens;
+    private final double polishTemperature;
 
-    public PolishingAgent(ChatClient.Builder chatClientBuilder) {
+    public PolishingAgent(ChatClient.Builder chatClientBuilder,
+                          @Value("${novel.llm.polish-debug-dump-enabled:false}") boolean polishDebugDumpEnabled,
+                          @Value("${novel.llm.polish-debug-dump-dir:logs/polish-debug}") String polishDebugDumpDir,
+                          @Value("${novel.llm.polish-max-attempts:3}") int polishMaxAttempts,
+                          @Value("${novel.llm.polish-retry-delay-ms:2000}") long polishRetryDelayMs,
+                          @Value("${novel.llm.polish-max-tokens:4096}") int polishMaxTokens,
+                          @Value("${novel.llm.polish-temperature:0.8}") double polishTemperature) {
         this.chatClient = chatClientBuilder.build();
-        log.info("【AI代理初始化】PolishingAgent 已就绪（按 WritingPipeline 分支润色）");
+        this.polishDebugDumpEnabled = polishDebugDumpEnabled;
+        this.polishDebugDumpDir = polishDebugDumpDir == null ? "logs/polish-debug" : polishDebugDumpDir.trim();
+        this.polishMaxAttempts = Math.max(1, Math.min(10, polishMaxAttempts));
+        this.polishRetryDelayMs = Math.max(0L, polishRetryDelayMs);
+        this.polishMaxTokens = Math.max(256, Math.min(8192, polishMaxTokens));
+        this.polishTemperature = Math.max(0, Math.min(2, polishTemperature));
+        log.info("【AI代理初始化】PolishingAgent 已就绪（润色重试 {} 次，间隔 {}ms）", this.polishMaxAttempts, this.polishRetryDelayMs);
     }
 
     public String polish(String content, String outline, int chapterNumber) {
@@ -52,16 +78,53 @@ public class PolishingAgent {
         };
 
         log.debug("【✨ 润色优化】提示词长度: {} 字符", prompt.length());
+        maybeDumpPolishPromptForTest(p, chapterNumber, prompt);
 
+        OpenAiChatOptions opts = OpenAiChatOptions.builder()
+                .temperature(polishTemperature)
+                .maxTokens(polishMaxTokens)
+                .build();
+
+        Exception lastException = null;
+        for (int attempt = 1; attempt <= polishMaxAttempts; attempt++) {
+            long t0 = System.currentTimeMillis();
+            try {
+                String result = chatClient.prompt(prompt).options(opts).call().content();
+                long reqElapsed = System.currentTimeMillis() - t0;
+                if (result != null && !result.isBlank()) {
+                    long totalElapsed = System.currentTimeMillis() - startTime;
+                    log.info("【✨ 润色优化】✅ 完成 - 第 {}/{} 次 - 本请求: {}ms, 累计: {}ms, 结果长度: {} 字符",
+                            attempt, polishMaxAttempts, reqElapsed, totalElapsed, result.length());
+                    return result;
+                }
+                log.warn("【✨ 润色优化】返回空 - 第 {}/{} 次 - 本请求: {}ms", attempt, polishMaxAttempts, reqElapsed);
+            } catch (Exception e) {
+                lastException = e;
+                long reqElapsed = System.currentTimeMillis() - t0;
+                log.warn("【✨ 润色优化】❌ 第 {}/{} 次失败 - 本请求: {}ms, {}",
+                        attempt, polishMaxAttempts, reqElapsed, e.getMessage());
+            }
+            if (attempt < polishMaxAttempts && polishRetryDelayMs > 0) {
+                sleepPolishRetry(polishRetryDelayMs);
+            }
+        }
+        long totalElapsed = System.currentTimeMillis() - startTime;
+        log.error("【✨ 润色优化】❌ 已用尽 {} 次尝试 - 累计: {}ms", polishMaxAttempts, totalElapsed, lastException);
+        if (lastException instanceof RuntimeException re) {
+            throw re;
+        }
+        if (lastException != null) {
+            throw new RuntimeException(lastException);
+        }
+        throw new IllegalStateException("文笔润色：LLM 返回为空（已重试 " + polishMaxAttempts + " 次）");
+    }
+
+    private void sleepPolishRetry(long delayMs) {
         try {
-            String result = chatClient.prompt(prompt).call().content();
-            long elapsed = System.currentTimeMillis() - startTime;
-            log.info("【✨ 润色优化】✅ 完成 - 耗时: {}ms, 结果长度: {} 字符", elapsed, result.length());
-            return result;
-        } catch (Exception e) {
-            long elapsed = System.currentTimeMillis() - startTime;
-            log.error("【✨ 润色优化】❌ 失败 - 耗时: {}ms", elapsed, e);
-            throw e;
+            Thread.sleep(delayMs);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("【✨ 润色优化】重试等待被中断");
         }
     }
 
@@ -180,6 +243,35 @@ public class PolishingAgent {
             long elapsed = System.currentTimeMillis() - startTime;
             log.error("【叙事流体润滑】❌ 失败 - 耗时: {}ms，保留原文", elapsed, e);
             return content;
+        }
+    }
+
+    /**
+     * 开启 {@code novel.llm.polish-debug-dump-enabled} 时，将本次发给模型的完整润色提示词写入目录，
+     * 便于复制到 Playground / curl 做耗时与效果对比（文件含正文与大纲背景，勿提交仓库）。
+     */
+    private void maybeDumpPolishPromptForTest(WritingPipeline pipeline, int chapterNumber, String prompt) {
+        if (!polishDebugDumpEnabled || prompt == null) {
+            return;
+        }
+        try {
+            Path dir = Paths.get(polishDebugDumpDir).toAbsolutePath().normalize();
+            Files.createDirectories(dir);
+            String ts = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(LocalDateTime.now());
+            String fn = String.format("polish-%s-ch%d-%s-%d.txt",
+                    pipeline.name(), chapterNumber, ts, System.nanoTime());
+            Path file = dir.resolve(fn);
+            String header = """
+                    # 润色请求快照（与 ChatClient 发送的用户消息一致）
+                    pipeline=%s
+                    chapterNumber=%d
+                    promptChars=%d
+                    ---
+                    """.formatted(pipeline.name(), chapterNumber, prompt.length());
+            Files.writeString(file, header + prompt, StandardCharsets.UTF_8);
+            log.warn("【润色调试】已写出完整提示词: {}", file);
+        } catch (Exception e) {
+            log.warn("【润色调试】写出提示词失败: {}", e.getMessage());
         }
     }
 

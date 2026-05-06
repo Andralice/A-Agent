@@ -9,6 +9,8 @@
 - **与 `web-agent/note/前端对接需求.md` 的关系（重要）**：该文件位于 **Electron/web-agent 前端仓库**，由 **前端维护**。后端 **只读、不写入** 该文件；不在该文件内追记 API 变更。联调所需的 **契约说明、字段含义、别名表、错误与 JSON 样例、运行时开关、`fromPath` 全表、M7/M9 行为** 等，一律在 **本文档** 与 **`前端与用户指引.md`** 中 **撰写与修订**；若前端备忘与本文冲突，以 **本仓库当前代码 + 本文档** 为准。后端未在每次迭代中「对照检查」前端仓库文件内容，以前述两文档为权威即可。  
 - **上手（M1～M10 + 导演台）**：[导演台与叙事功能使用说明.md](./导演台与叙事功能使用说明.md)。
 - **文档修订（2026-05-05）**：**「角色生死与后续出场」**（剧情语义｜与 HTTP 契约并列的产品预期）：见下文 **「常见问题」** 新增一行及 **「角色生死与后续出场」** 专节。
+- **文档修订（2026-05-06）**：**本章登场调度 + 动态角色状态闭环**：`novel.generation` 下 **`character-cast-enabled` / `character-state-inject-enabled` / `character-state-delta-enabled`**（默认 `false`）；**`GET /api/novel/config/frontend-runtime`** 返回同名 camelCase 布尔；**`GET /api/novel/{novelId}/character-narrative-states`** 列出 **`novel_character_state`**；**`writingStyleParams.chapterCastDefault`** 纳入 §16.2.1 受支持分支；**本章设定** 可为 JSON（含 **`chapterCast`**），详见 **§1.4** 与 **`note/db.md`**。
+- **文档修订（2026-05-06｜产品前端对接）**：新增 **§4.10「角色叙事调度与动态状态（产品前端对接）」**——约定 **`chapterCast` / `chapterCastDefault`** 的表单、`generationSetting` **字符串**承载 JSON、**`writing-style-params` 深合并**、与 **`character-narrative-states`** 的刷新时机；**§4.9** 续写步骤补充 **`generationSetting`** 说明；**§5** 补充 **`novel.generation.character-*`** 与前端 **`frontend-runtime`** 对齐说明。
 - **文档修订（2026-05-02｜文笔与参数总表）**：**`writingStyleParams`** 存库改为 **整棵 JSON 校验后写回**（与叙事 / 认知弧线 / 文笔四层并存不丢字段）；新增 **§16.2.1～16.2.6**（文风枚举、**情绪参数 `narrative`**、**M6**、**认知弧线**、**文笔四层** 的类型、范围与前端配置说明）；**文笔旋钮**注入 **初稿 + 主润色**。
 - **文档修订（2026-05-02｜参数并存与前端须知）**：新增 **§16.2.8**（无字段级互斥校验、**M2 与轻小说章规划互斥**、**叙事引擎关闭后认知/文笔仍生效**、语义重叠与提示优先级、主润色 vs Lint/Flow/M8）。
 
@@ -28,7 +30,7 @@
 - **全局异常包装 `ApiResponse`**（未在上述控制器内捕获时）:
   - 字段: `code`(数字 HTTP 语义)、`message`、`data`
   - 典型: `404` 未找到小说（含：**访客访问「仅管理员」书库时故意返回 404**，避免泄露该书存在）；`400` 参数问题；`403` 需要管理员登录（如修改书库可见性）；`500` 统一为「服务暂时不可用，请稍后重试」（详情仅服务端日志）
-- **`writingStyleParams` 全书 JSON**（文风 / 情绪 `narrative` / M6 / 认知弧线 / 文笔四层）的类型、范围与前端配置：**§16.2.1～16.2.6**；**并存边界与「冲突」说明（前端必读）**：**§16.2.8**。精简备忘见 **[前端与用户指引.md](./前端与用户指引.md)**「二」。
+- **`writingStyleParams` 全书 JSON**（文风 / 情绪 `narrative` / M6 / 认知弧线 / 文笔四层 / **叙事调度 `chapterCastDefault`**）的类型、范围与前端配置：**§16.2.1～16.2.6**；**产品 UI 如何编辑全书默认与本章 Cast、如何展示动态状态**：**§4.10**；**并存边界与「冲突」说明（前端必读）**：**§16.2.8**。精简备忘见 **[前端与用户指引.md](./前端与用户指引.md)**「二」。
 
 ### 同源静态页「导演台」`/novels.html`（与产品前端、AI 协作）
 
@@ -36,7 +38,7 @@
 |------|------|
 | **浏览器路径** | 与 REST **同源**：**`http://<host>:8080/novels.html`**（path 为 **`/novels.html`**，**不是** `/api/...`）。 |
 | **源码位置** | 本仓库 **`src/main/resources/static/novels.html`**，Spring Boot **静态资源**随 jar 下发。 |
-| **作用（是什么）** | 内置 **轻量联调 + 小运维**：`frontend-runtime`、书列表、登录、创建/删除守卫、按书 **导演台**（**`GET`**：`writing-monitor`、`narrative-state`、`pipeline`、`generation-tasks`；**`POST`**：**`.../pipeline`**、**`.../hot-meme`**、**`.../writing-style-params`**、**`.../book-meta`**、**`.../continue`**、**`.../auto-continue`**；任务 **cancel / kick / retry**）。与 web-agent **同一套 REST**。 |
+| **作用（是什么）** | 内置 **轻量联调 + 小运维**：`frontend-runtime`、书列表、登录、创建/删除守卫、按书 **导演台**（**`GET`**：`writing-monitor`、`narrative-state`、`character-narrative-states`、`pipeline`、`generation-tasks`；**`POST`**：**`.../pipeline`**、**`.../hot-meme`**、**`.../writing-style-params`**、**`.../book-meta`**、**`.../continue`**、**`.../auto-continue`**；任务 **cancel / kick / retry**）。与 web-agent **同一套 REST**。 |
 | **不是什么** | **不是** Electron **web-agent** 里的产品 UI；**不**替代 **`web-agent/note/前端对接需求.md`**（该文件由前端仓库维护，后端 **只读**）。契约与字段以 **本文档 + 本仓库 Java** 为准。 |
 | **产品前端（另一仓库）该怎么做** | 线上/桌面产品 **仍应在 web-agent 中** 按本文档调用 **`/api/novel/...`**。`/novels.html` **可选**：用于与本服务 **对照 JSON**、联调、QA 验收；**不必**复刻或内嵌，除非团队显式用 WebView 挂同源页。 |
 | **AI / 编码助手该怎么做** | 排查小说域 HTTP 时：可引导用户打开 **`http://<host>:8080/novels.html`** 复现；说明接口时 **引用本文档 § 与具体 ` /api/...` 路径**；「导演台」指 **该静态路径 + 其内部发起的 API**，勿与 **web-agent 路由** 混为一谈；**不要**把 HTML 里的展示逻辑当成唯一真相来源。 |
@@ -58,6 +60,7 @@
 | 永久删除 | `POST` | `/api/novel/{novelId}/delete` |
 | 导演台·写作监控 | `GET` | `/api/novel/{novelId}/writing-monitor` |
 | 导演台·M9 跨章状态 | `GET` | `/api/novel/{novelId}/narrative-state` |
+| 导演台·角色动态状态 | `GET` | `/api/novel/{novelId}/character-narrative-states` |
 | 导演台·流水线快照 | `GET` | `/api/novel/{novelId}/pipeline` |
 | 导演台·切换流水线 | `POST` | `/api/novel/{novelId}/pipeline` |
 | 导演台·热梗开关 | `POST` | `/api/novel/{novelId}/hot-meme` |
@@ -80,14 +83,15 @@
 
 | 事项 | 说明 / 接口 |
 |------|----------------|
-| **拉运行时配置** | 应用启动或进入创作域时调用 **`GET /api/novel/config/frontend-runtime`**，用返回的 **`m9CrosscutEnabled`**、`app.security.enabled` 等与 UI 开关、文案、校验对齐（部署覆盖 `application.yml` 时以本接口为准）。 |
+| **拉运行时配置** | 应用启动或进入创作域时调用 **`GET /api/novel/config/frontend-runtime`**，用返回的 **`m9CrosscutEnabled`**、**`characterCastEnabled`**、**`characterStateInjectEnabled`**、**`characterStateDeltaEnabled`**、`app.security.enabled` 等与 UI 开关、文案、校验对齐（部署覆盖 `application.yml` 时以本接口为准）。三者均为 **`false`** 时：宜隐藏或灰显「本章登场 / 全书默认登场 / 角色动态状态」相关表单与 Tab（见 **§4.10**）。 |
+| **角色叙事调度与动态状态 UI** | **§4.10**：全书 **`chapterCastDefault`** 经 **`POST .../writing-style-params`** 与现有微参 **深合并** 提交；本章 **`chapterCast`** 放在 **`generationSetting` 字符串**（内为 JSON）里，随 **`POST .../continue`** / **`.../auto-continue`** / **`.../regenerate`** / **`.../regenerate-range`** 及 **`POST /api/novel-style/{style}/{novelId}/continue`** 提交；章节任务 **`DONE`** 且 **`characterStateDeltaEnabled`** 为真时可刷新 **`GET .../character-narrative-states`**。 |
 | **书库与安全** | `app.security.enabled=true` 时：登录 **`POST /api/auth/login`** 存 JWT；访问 **`libraryPublic=false`** 的书须在受保护接口上带 **`Authorization: Bearer <token>`**；理解访客对非公开书 **`GET /api/novel/{id}` 等为 404**（故意不泄露存在性）。 |
 | **异步任务 UX** | `create` / `continue` / `regenerate` 等返回 **`taskId`** 后：轮询 **`GET /api/novel/{novelId}/writing-monitor`**（推荐）或 **`GET /api/novel/tasks/{taskId}`**；按需暴露 **`cancel` / `retry` / `kick`**。 |
 | **文风字符串** | `pipeline` 与 **`/api/novel-style/{style}/...`** 中的 **`{style}`** 使用上文 **「与 `WritingPipeline.fromPath` 对齐的前端映射表」** 中的别名；**未收录的任意字符串会静默解析为 `POWER_FANTASY`**（HTTP 多为 200）。 |
 | **续写 URL 与真实流水线** | **`POST /api/novel-style/{style}/{novelId}/continue`** 中路径里的 **`{style}` 不覆盖** 该书已保存的 **`writingPipeline`**；实际生成以 **`GET .../pipeline`** 为准。要换文风先 **`POST /api/novel/{novelId}/pipeline`**，再续写。 |
 | **M9 展示与预期** | 若 UI 展示跨章状态：调 **`GET /api/novel/{novelId}/narrative-state`**，**`narrativeState` 可为 `null`**（开关关、尚无章节落库、或旧书无列数据）。**第 1 章初稿**服务端 **不会** 注入 M9 快照块（无「上一快照」）；**第 2 章起**由服务端在模型上下文中拼接，**前端无需也不应**自行拼该块。 |
 | **删除书** | 先 **`GET /api/novel/{novelId}/delete-guard`**，再 **`POST /api/novel/{novelId}/delete`** 按返回规则传 **`confirmTitle` / `typedPhrase` / `acknowledgeIrreversible`**（见 §2.2）。 |
-| **大纲与监控** | 创建页默认值：**`GET /api/novel/config/outline-plan-defaults`**；完整页面—接口映射与推荐调用流见 **§4「前端联调手册」**（尤其 **§4.5～§4.9**）。 |
+| **大纲与监控** | 创建页默认值：**`GET /api/novel/config/outline-plan-defaults`**；完整页面—接口映射与推荐调用流见 **§4「前端联调手册」**（尤其 **§4.5～§4.10**）。 |
 | **同源联调页** | 见上文 **「同源静态页「导演台」`/novels.html`」**；部署后打开 **`http://<host>:8080/novels.html`**，与 web-agent **并行对照**同一套 **`/api/novel/...`**。 |
 
 ### 常见问题（前端常问）
@@ -102,6 +106,7 @@
 | **`TASK_CONFLICT` 是什么？** | 章节类生成与区间锁、或与 **重新生成大纲** 等互斥；详见下文 **「`TASK_CONFLICT` 触发规则」**。 |
 | **书存在为什么访客 `GET` 小说详情是 404？** | **`libraryPublic=false`** 时访客 **不可见**，与物理不存在 **同源 404** 策略。见 §0 与 §2。 |
 | **`/novels.html` 和产品里的页面是什么关系？** | **`/novels.html`** 是 **本仓库自带的联调页**，见 **「同源静态页「导演台」`/novels.html`」**；产品界面在 **web-agent**，两边 **共用后端 API**，职责不同。 |
+| **`character-narrative-states` 一直是 `[]`？** | 可能 **`characterStateDeltaEnabled`** 为 `false`、本章 **登场名单为空**（未配 **`chapterCast`** / **`chapterCastDefault`**）、任务未 **`DONE`**、或落库前查询。见 **§4.10.4**、**§1.4**。 |
 | **某角色在前文剧情里死了，后文还会被写出来吗？** | **会仍有较高概率被提及或「写活」**：服务端 **没有**「角色已死亡」专用字段或 REST；`character_profile` **不随剧情自动删除**；每章仍注入 **全书角色档案** 与 **姓名锁定**（`immutableConstraints`）。事实记忆里的 **`character_state`** 只是「正文含该姓名的段落摘录」，**不理解**生死语义。姓名一致性检测按「上一章是否出现该姓名」等规则工作，**不等于**「死后禁止出场」。合理做法：在 **`POST .../continue` 等 `generationSetting`** 或 **`POST .../writing-style-params`** 备注中写明禁忌；必要时 **重生后续章** 或人工改文。详见下节。 |
 
 ### 角色生死与后续出场（剧情语义｜当前实现）
@@ -336,9 +341,9 @@
 
 - 方法: `GET`
 - 路径: `/api/novel/config/frontend-runtime`
-- 作用: 返回与 UI 校验相关的**服务端当前配置**（**不含**密钥与密码）；便于与前端 `CONFIG.*` 常量对齐。字段与 `application.yml` 中 `app.security.*`、`novel.auto-continue.*`、`novel.outline.*`（含 **`outlineTwoPhaseGraphEnabled`**、**`outlineGraphPhaseMaxTokens`**）、`novel.narrative-engine.enabled` / `m7-artifact-enabled` / **`m9-crosscut-enabled`** 一致（部署若覆盖 yml，以此接口为准）。
+- 作用: 返回与 UI 校验相关的**服务端当前配置**（**不含**密钥与密码）；便于与前端 `CONFIG.*` 常量对齐。字段与 `application.yml` 中 `app.security.*`、`novel.auto-continue.*`、`novel.outline.*`（含 **`outlineTwoPhaseGraphEnabled`**、**`outlineGraphPhaseMaxTokens`**）、`novel.narrative-engine.enabled` / `m7-artifact-enabled` / **`m9-crosscut-enabled`**、**`novel.generation.character-cast-enabled` / `character-state-inject-enabled` / `character-state-delta-enabled`** 一致（部署若覆盖 yml，以此接口为准）。
 - 鉴权: **无需** JWT。
-- 返回: **Map 形态**，除 `status`/`code`/`message` 外扁平字段见文末 **「附录 A」**（含 **`m9CrosscutEnabled`**）。
+- 返回: **Map 形态**，除 `status`/`code`/`message` 外扁平字段见文末 **「附录 A」**（含 **`m9CrosscutEnabled`**、**角色叙事闭环三项布尔**）。
 
 ### 1.3 获取跨章叙事状态快照（M9）
 
@@ -347,6 +352,15 @@
 - 作用: 返回本书 **`narrative_state_json`** 解析后的 **`narrativeState`** 对象（聚合 M4 承接预览、衔接锚点、侧车实体/事实摘要、近期 `sidecar_fact`、阶段快照摘录，以及 **`relationshipHints`**、**`tensionRippleHint`**、**`schemaVersion`** 等深化字段，见文首「叙事相关」）。需 **`novel.narrative-engine.m9-crosscut-enabled: true`** 且在章节成功生成后才会写入；关闭开关或旧书无数据时 **`narrativeState` 为 `null`**，并带简短 **`message`**。另：开关为 `true` 时，**从第 2 章起的初稿**会在服务端上下文附带 **上一章落库后** 的快照摘录块（**第 1 章初稿无上一快照，故不注入**；见 **「前端职责与常见问题」**）。
 - 鉴权: 与其它 `novelId` 读接口相同（`guardRead`）。
 - 返回: `novelId`、`narrativeState`（JSON 对象或 `null`）；解析失败时可能含 **`narrativeStateRaw`**。
+
+### 1.4 获取书本级角色动态状态（登场调度闭环）
+
+- 方法: `GET`
+- 路径: `/api/novel/{novelId}/character-narrative-states`
+- 作用: 返回本书 **`novel_character_state`** 表中的全部行（**`NovelCharacterState` 实体数组**）：每行含 **`novelId`**、**`characterKey`**（与角色档案姓名规范化一致）、**`stateJson`**（柔性 JSON 字符串）、**`updatedAt`**、**`sourceChapter`**（最近一次 Delta 写入来源章节，可为 `null`）。无数据时 **`[]`**。与静态 **`character_profile`** 并列，供 UI 展示「模型侧写出的可变态度/记忆碎片」等。
+- 前提: 运维开启 **`novel.generation.character-state-delta-enabled`** 且章节成功落库后曾对本章 cast 产出过 Delta，表中才会有行；仅开 Cast/注入而未开 Delta 时通常仍为空数组。
+- 鉴权: 与其它 `novelId` 读接口相同（`guardRead`）。
+- **写入路径**: 非本接口；由 **`POST .../continue`** 等触发的生成在 **章节保存成功后** 服务端调用低温模型合并 Delta（详见 **`note/角色三层注入与状态闭环计划.md`**「实施记录」）。
 
 ### 2. 获取小说基础信息
 - 方法: `GET`
@@ -717,8 +731,9 @@
 | 叙事物理 M6 | **`narrativePhysicsMode`** | string | 连续微扰 vs 压力阈值分桶，见 **§16.2.4** |
 | 认知弧线 | **`narrativeArcPhase`**、**`cognitionArc`** | string + object | 全书阶段与人物判断/代价取向，见 **§16.2.5** |
 | 文笔四层 | **`rhythm`**、**`perception`**、**`language`**、**`informationFlow`**（或 `information_flow`） | object | 句法节奏、感知权重、词粒度、信息揭示策略，见 **§16.2.6** |
+| 叙事调度·全书默认登场 | **`chapterCastDefault`** | object | **`characters`** 为非空数组且每项含有效 **`name`** 时视为有效；结构与本章 JSON 内 **`chapterCast`** 相同（`focus[]`、`restrictOthersToBackground` 等）。本章 **`generationSetting`**（或等价字段）若以 `{` 开头解析为 JSON 且含非空 **`chapterCast.characters`**，则**覆盖**本书默认。需 **`characterCastEnabled`** 等开关方注入初稿，见 **§1.4** / 计划文档。 |
 
-**前端建议**：详情页 / 导演台用 **Tab 或折叠面板** 对应上表五类，共用内存中的 **一个** `writingStyleParams` 对象；保存前深合并（若分模块编辑）或始终读写完整对象。**各分支同时存在时是否「打架」、运维关叙事引擎后哪些仍生效**：见 **§16.2.8**。
+**前端建议**：详情页 / 导演台用 **Tab 或折叠面板** 对应上表 **六类**（含 **`chapterCastDefault`**），共用内存中的 **一个** `writingStyleParams` 对象；保存前深合并（若分模块编辑）或始终读写完整对象。**各分支同时存在时是否「打架」、运维关叙事引擎后哪些仍生效**：见 **§16.2.8**。
 
 ---
 
@@ -1215,12 +1230,13 @@
 | 叙事引擎侧车列表（M7） | `GET /api/novel/{novelId}/narrative-artifacts` | 仅含已落库快照的章；每项 `chapterNumber`、`chapterTitle`、`artifact`（JSON）。 |
 | 单章叙事引擎侧车（M7） | `GET /api/novel/{novelId}/chapters/{n}/narrative-artifact` | `artifact` 可为 `null`；无该章 **404**。 |
 | 跨章叙事状态（M9） | `GET /api/novel/{novelId}/narrative-state` | `narrativeState` 书本级聚合 JSON；依赖 `m9-crosscut-enabled`。 |
+| 角色动态状态（闭环） | `GET /api/novel/{novelId}/character-narrative-states` | `NovelCharacterState[]`；依赖 Delta 开关与落库后写入，见 §1.4。 |
 | 任务列表 | `GET /api/novel/{novelId}/generation-tasks` | `tasks` 数组：`status`（`PENDING`/`RUNNING`/`DONE`/`FAILED`/`CANCELLED`）、`taskType`、`rangeFrom`/`rangeTo`、`currentChapter`、`heartbeatAt` 等。 |
 | 单任务 | `GET /api/novel/tasks/{taskId}` | 轮询主接口之一；先 `guardTask` 书库可读。 |
 | 写作监控（推荐） | `GET /api/novel/{novelId}/writing-monitor` | 聚合 DB 任务 + 内存区间锁 + 非 READY 章节；适合详情页「生成中」横幅与禁用按钮逻辑。 |
 | 进度摘要 | `GET /api/novel/{novelId}/progress` | `chapterCount`、`outlineReady`、`charactersReady`、`failedCount`、工作台字段。 |
 | 创建页默认 | `GET /api/novel/config/outline-plan-defaults` | 表单默认与 clamp 区间。 |
-| 运行时配置快照 | `GET /api/novel/config/frontend-runtime` | `securityEnabled`、`jwtExpirationMs`、自动续写上下限、大纲 clamp、**`narrativeEngineEnabled`**、M7/M9、两阶段大纲等（与 yml 一致）；**§16.2.8** 依赖 **`narrativeEngineEnabled`** 解释叙事参数是否注入。 |
+| 运行时配置快照 | `GET /api/novel/config/frontend-runtime` | `securityEnabled`、`jwtExpirationMs`、自动续写上下限、大纲 clamp、**`narrativeEngineEnabled`**、M7/M9、两阶段大纲、**`characterCastEnabled`** / **`characterStateInjectEnabled`** / **`characterStateDeltaEnabled`**（与 `novel.generation.*` 一致）；**§16.2.8** 依赖 **`narrativeEngineEnabled`** 解释叙事参数是否注入。 |
 
 ### 4.3 异步生成：轮询策略建议
 
@@ -1233,7 +1249,7 @@
 ### 4.4 文风与叙事参数（前端表单）
 
 - **全书流水线**：`POST /api/novel/{novelId}/pipeline`，Body `{"pipeline":"<字符串>"}`。字符串语义为 **HTTP/API 路径级别名**，与 **`/api/novel-style/{style}/...`** 的 `{style}` 共用 **`fromPath`** 规则；**完整列表**见文首 **「文风与流水线」** 一节（推荐 `power-fantasy`、`light-novel` 等 kebab-case）。
-- **全书参数 JSON**：`POST .../writing-style-params`，根对象可同时包含：**文风枚举**（§16.2.2）、**`narrative` 情绪参数**（§16.2.3）、**`narrativePhysicsMode`**（§16.2.4）、**认知弧线**（§16.2.5）、**文笔四层**（§16.2.6）；或使用 **`writingStyleParamsRaw`** 传整段 JSON 字符串。校验与存库规则见 **§16.2** / **§16.2.1**。**并存与运维边界（叙事引擎关闭后谁仍生效等）**：**§16.2.8**。
+- **全书参数 JSON**：`POST .../writing-style-params`，根对象可同时包含：**文风枚举**（§16.2.2）、**`narrative` 情绪参数**（§16.2.3）、**`narrativePhysicsMode`**（§16.2.4）、**认知弧线**（§16.2.5）、**文笔四层**（§16.2.6）、**`chapterCastDefault`**（全书默认登场，§16.2.1 / **§4.10**）；或使用 **`writingStyleParamsRaw`** 传整段 JSON 字符串。校验与存库规则见 **§16.2** / **§16.2.1**。**并存与运维边界（叙事引擎关闭后谁仍生效等）**：**§16.2.8**。
 - **只读展示**：详情 / pipeline 接口返回的 **`writingStyleParams`** 为字符串，前端需 **`JSON.parse`** 后再渲染表单；**`narrativeCarryover`** 仅展示或折叠调试，**无 PATCH 接口**，由服务端章节成功后维护。
 - **叙事引擎服务端开关**：`novel.narrative-engine.enabled` 等为运维配置，前端只需知悉「关闭则后端不注入叙事块」；详见 **§16.2.7**。
 
@@ -1250,7 +1266,7 @@
 | 单章 / 区间重生 | `POST .../chapters/{n}/regenerate`、`POST .../chapters/regenerate-range` |
 | 任务中心 | `GET .../generation-tasks`、`GET .../tasks/{taskId}`、`POST .../cancel|retry|kick` |
 | 监控横幅 | `GET .../writing-monitor` |
-| 质量 / 事实 | `GET .../consistency-alerts`、`GET .../chapter-facts`、`GET .../chapter-sidecar`、**`GET .../narrative-artifacts`**（M7）、**`GET .../chapters/{n}/narrative-artifact`**（M7）、**`GET .../narrative-state`**（M9）、`GET .../plot-snapshots`、`GET .../export-health` |
+| 质量 / 事实 | `GET .../consistency-alerts`、`GET .../chapter-facts`、`GET .../chapter-sidecar`、**`GET .../narrative-artifacts`**（M7）、**`GET .../chapters/{n}/narrative-artifact`**（M7）、**`GET .../narrative-state`**（M9）、**`GET .../character-narrative-states`**（角色动态状态，§4.10）、`GET .../plot-snapshots`、`GET .../export-health` |
 | 导出 | `GET .../export` 或 QQ 附件路径（见 §2） |
 | 管理员：书库可见性 | `POST .../library-visibility`（须管理员 JWT） |
 | 永久删除 | `GET .../delete-guard`、`POST .../delete` |
@@ -1269,7 +1285,7 @@
 
 ### 4.8 前端对接建议（关键）
 
-- **分工与 FAQ**：完整清单与一问一答见上文 **「前端职责与常见问题（联调）」**（含 **`frontend-runtime`**、M9 首章预期、**`pipeline`** 与 novel-style 续写差异）。
+- **分工与 FAQ**：完整清单与一问一答见上文 **「前端职责与常见问题（联调）」**（含 **`frontend-runtime`**、M9 首章预期、**`pipeline`** 与 novel-style 续写差异）；**角色登场 / `chapterCastDefault` / 动态状态**：**§4.10**。
 - **书库安全开关**：启动时或进入应用先调 `GET /api/auth/me`；若 `securityEnabled=true`，列表/详情请求统一带上本地缓存的 `Authorization: Bearer`；未登录用户访问非公开书可能收到 **404**，勿当成「接口坏了」，应引导登录或提示无权限。
 - **错误展示**: 失败响应优先展示 `message`；勿展示服务端堆栈或原始英文异常（详见文首「通用返回风格」与 [前端与用户指引.md](./前端与用户指引.md)）。
 - **详情页书籍注释区**: 展示 `serializationPlatform`、`creatorNote`；数据源可选 `GET /api/novel/{id}`、`GET .../outline`、`GET .../pipeline`；勿把 `description`（AI 大纲）误标为用户备注。
@@ -1317,6 +1333,7 @@
 4. **单章续写/自动续写**
 - 单章续写：`POST /api/novel/{novelId}/continue`
 - 自动续写：`POST /api/novel/{novelId}/auto-continue`
+- **`generationSetting`（本章附加设定）**：类型为 **字符串**。 plain 文本则整段即用户说明；若需 **本章登场调度**，应将对象 **`{ "notes"?: string, "chapterCast"?: { ... } }`**  **`JSON.stringify`** 后作为 **`generationSetting`** 提交（详见 **§4.10**）。**区间重生 / 单章重生** 请求中的 **`generationSetting`** 规则相同。
 - 提交后：
   - toast “任务已启动（taskId=xxx）”
   - 优先轮询 `GET /api/novel/tasks/{taskId}`
@@ -1368,12 +1385,80 @@
 - 成功：Toast `message`，跳转小说列表并移除该项（或 `router.replace` 回列表）
 - 失败：`code=DELETE_CONFIRM_MISMATCH` 时只展示 `message`，引导用户核对书名与确认句
 
+### 4.10 角色叙事调度与动态状态（产品前端对接）
+
+本节供 **web-agent / 其它产品前端** 实现「本章谁登场、焦点词、侧写不抢戏」「全书默认登场」「落库后模型增量状态」的编辑与展示。**契约以本文档与本仓库 Java 为准**；Electron 仓库内 **`前端对接需求.md`** 仍由前端维护，后端不写入该文件。
+
+#### 4.10.1 运行时开关与 UI 行为
+
+- 启动或进入创作域后拉 **`GET /api/novel/config/frontend-runtime`**，读取：
+  - **`characterCastEnabled`** → 为 `false` 时：服务端不解析/不注入 Cast；前端宜 **隐藏或灰显**「本章登场」「全书默认登场」编辑区，并可用简短文案说明「当前部署未开启角色登场调度」。
+  - **`characterStateInjectEnabled`** → 控制是否在生成上下文中附带库内 **`state_json`** 摘要（仍受服务端字符上限约束）；可与 Cast 开关组合。
+  - **`characterStateDeltaEnabled`** → 为 `false` 时：**不会**在章节成功落库后写 **`novel_character_state`**；前端「角色动态状态」列表可能长期为空，宜提示「未开 Delta」而非当作接口故障。
+- 上述布尔与 **`application.yml`** 中 **`novel.generation.character-cast-enabled`** / **`character-state-inject-enabled`** / **`character-state-delta-enabled`** 一致；**部署改 yml 后以前端运行时接口为准**，勿在前端硬编码。
+
+#### 4.10.2 全书默认登场：`chapterCastDefault`
+
+- **接口**：**`POST /api/novel/{novelId}/writing-style-params`**
+- **Body**：`{ "writingStyleParams": { ... } }`，在根对象上增加或修改 **`chapterCastDefault`**（与 **`chapterCast`** 结构相同，见下）。
+- **深合并（必读）**：接口对根对象是 **整树校验后写回**。前端须 **`JSON.parse`** 详情或 **`GET .../pipeline`** 返回的 **`writingStyleParams`** 字符串得到现有对象，在内存中与表单编辑结果 **深合并** 后再 **`POST`**，避免只提交 `{ "chapterCastDefault": {...} }` 导致其它文风/叙事键被清空。
+- **结构约定**（与 §16.2.1 一致）：
+
+```json
+{
+  "chapterCastDefault": {
+    "characters": [
+      { "name": "角色档案主名", "focus": ["焦点1", "焦点2"] }
+    ],
+    "restrictOthersToBackground": true
+  }
+}
+```
+
+- **`characters[].name`**：建议与 **`GET /api/novel/{novelId}/characters`** 中档案 **主名**一致，便于注入与 Delta 键 **`characterKey`** 对齐。
+- **`restrictOthersToBackground`**：可选；语义为「非登场名单角色尽量侧写、不抢戏」（服务端另有全局默认，见 yml）。
+
+#### 4.10.3 本章覆盖：`generationSetting` 中的 `chapterCast`
+
+- **类型**：HTTP Body 里字段名为 **`generationSetting`，类型为 `string`**（不是嵌套 JSON 对象）。
+- **两种形态**：
+  1. **纯文本**：例如 `"本章希望节奏紧一点"`，整段作为本章说明；**不要**以 `{` 开头却又不是合法 JSON（易被服务端按 JSON 解析失败退回或截断语义）。
+  2. **结构化（推荐）**：前端用对象组装后 **`JSON.stringify` 一次**，赋给 **`generationSetting`**，例如：
+
+```json
+{
+  "chapterNumber": 5,
+  "generationSetting": "{\"notes\":\"对峙为主\",\"chapterCast\":{\"characters\":[{\"name\":\"铁骑\",\"focus\":[\"急躁\"]}],\"restrictOthersToBackground\":true}}"
+}
+```
+
+- **合并规则（产品预期）**：本章 JSON 若含 **非空** **`chapterCast.characters`**，服务端 **优先于** 全书 **`chapterCastDefault`** 用于当章调度；细节见 **`note/角色三层注入与状态闭环计划.md`**。
+- **涉及的异步接口**（均有 **`generationSetting`** 且语义相同）：  
+  **`POST /api/novel/{novelId}/continue`**、**`POST .../auto-continue`**、**`POST .../chapters/{chapterNumber}/regenerate`**、**`POST .../chapters/regenerate-range`**、**`POST /api/novel-style/{style}/{novelId}/continue`**。
+
+#### 4.10.4 展示动态状态：`character-narrative-states`
+
+- **接口**：**`GET /api/novel/{novelId}/character-narrative-states`**
+- **返回**：**`NovelCharacterState` 数组**（非 Map 包裹）；每项含 **`characterKey`**、**`stateJson`**（字符串，前端 **`JSON.parse`** 后展示键值）、**`updatedAt`**、**`sourceChapter`** 等（见 §1.4、附录 A.2）。
+- **刷新时机**：在 **`characterStateDeltaEnabled`** 为 **`true`** 的前提下，于 **目标章节生成任务进入 `DONE` 且正文已成功落库** 之后再请求（可与 **`writing-monitor` / `tasks/{taskId}`** 结束态联动刷新）。若本章 **登场名单为空**，服务端 **跳过 Delta**，列表可能不变。
+- **与静态档案**：本接口为 **可变状态**；角色长相/人设仍以 **`GET .../characters`** 与详情中的档案为准，两者并列展示即可。
+
+#### 4.10.5 联调检查清单
+
+| 步骤 | 说明 |
+|------|------|
+| 1 | `frontend-runtime` 三布尔与 UI 显隐一致 |
+| 2 | 从 **`pipeline`** / 详情解析 **`writingStyleParams`**，合并 **`chapterCastDefault`** 后 POST，确认 GET 回写字符串含该键 |
+| 3 | 续写 Body 中 **`generationSetting`** 为 **字符串**；结构化时用 **`JSON.stringify`** |
+| 4 | 任务完成后 GET **`character-narrative-states`**；**`stateJson`** 需容错解析失败（模型输出异常时） |
+
 ---
 
 ## 5) 配置项（与前端强相关）
 
 `application.yml`:
 
+- **`novel.generation.character-cast-enabled`** / **`character-state-inject-enabled`** / **`character-state-delta-enabled`**：角色叙事调度总开关；前端 **勿写死**，以 **`GET /api/novel/config/frontend-runtime`** 返回的 **`characterCastEnabled`**、**`characterStateInjectEnabled`**、**`characterStateDeltaEnabled`** 为准（见 **§4.10**）。另可调 **`character-cast-max-names`**、**`character-state-inject-max-chars`**、**`character-state-delta-temperature`**、**`character-state-delta-max-tokens`** 等（纯运维，前端一般只读文档）。
 - `novel.auto-continue.default-target`: 自动续写默认目标章节数（未传目标时）
 - `novel.auto-continue.max-target`: 自动续写安全上限（防止误触发过大量生成）
 - `novel.outline.detailed-prefix-chapters` / `novel.outline.min-roadmap-chapters`: 大纲生成默认参数（前端不传创建体字段时使用）；详见「### 1.1」「### 16」
@@ -1413,6 +1498,9 @@
   "narrativeEngineEnabled": true,
   "m7ArtifactEnabled": true,
   "m9CrosscutEnabled": false,
+  "characterCastEnabled": false,
+  "characterStateInjectEnabled": false,
+  "characterStateDeltaEnabled": false,
   "outlineTwoPhaseGraphEnabled": true,
   "outlineGraphPhaseMaxTokens": 3600
 }
@@ -1445,6 +1533,23 @@
     "tensionRippleHint": "距上次阶段快照较近（1 章）：伏笔与情绪余波可适当加重，避免跳档。"
   }
 }
+```
+
+### A.2 `GET /api/novel/{novelId}/character-narrative-states`（有数据时）
+
+直接返回 **JSON 数组**（非 Map 包裹），元素字段与实体一致：
+
+```json
+[
+  {
+    "id": 1,
+    "novelId": 1001,
+    "characterKey": "铁骑",
+    "stateJson": "{\"attitudeToProtagonist\":\"戒备\",\"recentMemory_add\":[\"报数时抢话\"]}",
+    "updatedAt": "2026-05-06T10:00:00",
+    "sourceChapter": 3
+  }
+]
 ```
 
 ### B. Map 形态错误（续写 `TASK_CONFLICT`）
@@ -1497,7 +1602,7 @@
 }
 ```
 
-> 常见原因：Body 非 JSON、根不是 Object、或根对象 **不含 §16.2.1「受支持分支」中任意一类有效内容**（例如仅传 `{}`、或仅含未识别键）。
+> 常见原因：Body 非 JSON、根不是 Object、或根对象 **不含 §16.2.1「受支持分支」中任意一类有效内容**（例如仅传 `{}`、或仅含未识别键 —— **注意**：仅含空对象 **`chapterCastDefault`** 且无 **`characters`** 仍视为无效）。
 
 ### F. 访客访问 `libraryPublic=false` 的书（`GET /api/novel/{id}`）
 

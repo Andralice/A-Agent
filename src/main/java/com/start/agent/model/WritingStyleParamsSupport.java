@@ -66,6 +66,13 @@ public final class WritingStyleParamsSupport {
         if (cognitionArcObjectMeaningful(cog)) {
             return true;
         }
+        JsonNode chapterCastDefault = root.get("chapterCastDefault");
+        if (chapterCastDefault != null && chapterCastDefault.isObject()) {
+            JsonNode ch = chapterCastDefault.path("characters");
+            if (ch.isArray() && !ch.isEmpty()) {
+                return true;
+            }
+        }
         return proseCraftSignals(root);
     }
 

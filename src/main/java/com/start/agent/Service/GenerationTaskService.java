@@ -2,6 +2,7 @@ package com.start.agent.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.start.agent.exception.ChapterGenerationAbortedException;
 import com.start.agent.model.GenerationTask;
 import com.start.agent.model.GenerationTaskStatus;
 import com.start.agent.model.GenerationTaskType;
@@ -204,6 +205,17 @@ public class GenerationTaskService {
         return generationTaskRepository.findById(taskId);
     }
 
+    /** 供章节流水线协作式中止：任务已标为 CANCELLED 或记录不存在时视为应停止。 */
+    @Transactional(readOnly = true)
+    public boolean isTaskCancelled(Long taskId) {
+        if (taskId == null) {
+            return false;
+        }
+        return generationTaskRepository.findById(taskId)
+                .map(t -> GenerationTaskStatus.CANCELLED.name().equals(t.getStatus()))
+                .orElse(true);
+    }
+
     @Transactional
     public boolean cancelTask(Long taskId) {
         Optional<GenerationTask> opt = generationTaskRepository.findById(taskId);
@@ -274,6 +286,8 @@ public class GenerationTaskService {
             if (finishedAll) {
                 markDone(taskId);
             }
+        } catch (ChapterGenerationAbortedException e) {
+            log.info("generation task aborted (cancelled mid-chapter), taskId={}", taskId);
         } catch (Exception e) {
             log.error("generation task failed, taskId={}", taskId, e);
             markFailed(taskId, e.getMessage());
@@ -305,7 +319,7 @@ public class GenerationTaskService {
             }
             int target = payload.get("targetChapterCount") instanceof Number ? ((Number) payload.get("targetChapterCount")).intValue() : to;
             // 先补齐 outline + profile，再按章补齐到目标章节
-            novelAgentService.bootstrapNovel(DEFAULT_GROUP_ID, novelId, Math.max(1, target));
+            novelAgentService.bootstrapNovel(DEFAULT_GROUP_ID, novelId, Math.max(1, target), task.getId());
             if (!stillOwnsLease(task.getId(), claimStamp)) {
                 log.info("generation task lease lost after bootstrap, taskId={}", task.getId());
                 return false;
@@ -324,9 +338,9 @@ public class GenerationTaskService {
             }
             switch (type) {
                 case CONTINUE_SINGLE, AUTO_CONTINUE_RANGE ->
-                        novelAgentService.continueChapter(DEFAULT_GROUP_ID, novelId.intValue(), chapter, generationSetting);
+                        novelAgentService.continueChapter(DEFAULT_GROUP_ID, novelId.intValue(), chapter, generationSetting, task.getId());
                 case REGENERATE_RANGE ->
-                        novelAgentService.regenerateChapter(DEFAULT_GROUP_ID, novelId.intValue(), chapter, generationSetting);
+                        novelAgentService.regenerateChapter(DEFAULT_GROUP_ID, novelId.intValue(), chapter, generationSetting, task.getId());
             }
             updateHeartbeat(task.getId(), chapter);
         }
@@ -401,9 +415,7 @@ public class GenerationTaskService {
     }
 
     private boolean isCancelled(Long taskId) {
-        return generationTaskRepository.findById(taskId)
-                .map(t -> GenerationTaskStatus.CANCELLED.name().equals(t.getStatus()))
-                .orElse(true);
+        return isTaskCancelled(taskId);
     }
 
     @Transactional

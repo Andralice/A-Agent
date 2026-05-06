@@ -33,9 +33,10 @@ spring:
       base-url: ${OPENAI_BASE_URL:https://api.meai.cloud}
       chat:
         options:
-          model: glm-5.1
+          model: claude-sonnet-4-6
           temperature: 0.8
           max-tokens: 4096
+          # 单次 HTTP 读超时（含润色等所有 chat）；过大易挂死过久，过小易误判；可配 300s~600s 与 novel.llm.polish-max-attempts 联用
           timeout: 1800s
 
   task:
@@ -51,9 +52,40 @@ qq:
   allowed-groups: 1103130289
 
 novel:
+  # 章节流水线：false 则跳过「文笔润色」整段 LLM（仍保留内容审核与后续终稿等步骤）
+  generation:
+    polish-enabled: true
+    # —— 角色叙事调度（本章登场 focus + 动态状态注入 + 落库后增量）；下述三开关当前为开；若需与旧版一致可改回 false
+    # 本章 JSON：`chapterSetting` 可为 {"notes":"…","chapterCast":{"characters":[{"name":"…","focus":["…"]}],"restrictOthersToBackground":true}}
+    # 全书默认：`writingStyleParams` 根键 chapterCastDefault（结构同 chapterCast）
+    character-cast-enabled: true
+    character-cast-max-names: 5
+    character-cast-restrict-background: true
+    character-state-inject-enabled: true
+    character-state-inject-max-chars: 3500
+    character-state-delta-enabled: true
+    character-state-delta-temperature: 0.25
+    character-state-delta-max-tokens: 1200
   auto-continue:
     default-target: 20
     max-target: 200
+  # LLM 瞬时网络错误（如 Connection reset）重试：callAi（大纲正文/初稿/角色/轻小说规划/终稿/sidecar/一致性修复等）、callAiPlanner（M2）
+  llm:
+    # true 时将润色步骤完整 prompt 写入 polish-debug-dump-dir（含大纲背景与待润色正文），用于离线测试/对比耗时；默认关
+    polish-debug-dump-enabled: true
+    polish-debug-dump-dir: logs/polish-debug
+    # 润色步骤「大纲+设定+文风块」总长度上限（字符），超出截断前缀，减轻远端排队与单次调用过久
+    polish-context-max-chars: 18000
+    # 文笔润色：超时/空响应/异常时重试（单次读超时仍受 spring.ai.openai.chat.options.timeout 约束）
+    polish-max-attempts: 3
+    # 两次润色尝试之间的等待（5 分钟 = 300000 ms）
+    polish-retry-delay-ms: 300000
+    polish-max-tokens: 4096
+    polish-temperature: 0.8
+    chat-max-attempts: 3
+    chat-retry-delay-ms: 1000
+    planner-max-attempts: 3
+    planner-retry-delay-ms: 1000
   # 大纲生成：防止模型把全书主线压缩成十几～二十章；可调高以更强约束长篇分期
   outline:
     detailed-prefix-chapters: 40
@@ -63,6 +95,10 @@ novel:
     graph-phase-temperature: 0.35
     # cast 角色表加入图谱后输出更长，略抬高上限减少截断
     graph-phase-max-tokens: 3600
+    # 图谱阶段 LLM 调用：瞬时网络错误（如 Connection reset）时最多尝试次数（含首次）；用尽后退回单阶段大纲
+    graph-phase-max-attempts: 3
+    # 图谱阶段两次尝试之间的等待（毫秒）；可与网关/CDN 恢复节奏对齐
+    graph-phase-retry-delay-ms: 1000
     # 角色生成时从 Markdown 大纲摘取的最大字符（世界观/主角/主要/对立/冲突概要）
     character-excerpt-max-chars: 14000
   light-novel:

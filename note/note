@@ -12,3 +12,16 @@ mvn spring-boot:run "-Dspring-boot.run.profiles=local"
 .\note\deploy.ps1
 
 .\note\push-github.ps1 -Message "常规更新 2026 5 5"
+
+$env:OPENAI_API_KEY='你的key'
+$env:OPENAI_BASE_URL='https://api.meai.cloud'
+cd "d:\解压\agent，ai\A-Agent\note"
+python model_speed_test.py --model glm-5.1 --model qwen-turbo
+
+python model_speed_test.py --model 你的模型 --max-tokens 4096 `
+  --prompt-file ..\logs\polish-debug\polish-LIGHT_NOVEL-ch2-20260505-203303-31671530803500.txt
+
+  D:\解压\agent，ai\A-Agent\logs\polish-debug\polish-LIGHT_NOVEL-ch2-20260505-203303-31671530803500.txt
+
+  python model_speed_test.py --model glm-5.1 --max-tokens 4096 `
+  --prompt-file ..\logs\polish-debug\polish-LIGHT_NOVEL-ch2-20260505-203303-31671530803500.txt

@@ -18,6 +18,7 @@
 | 剧情快照 | `plot_snapshot` | 阶段性主线摘要 |
 | 生成任务 | `generation_task` | 可恢复的异步生成任务（续写/重生/新建） |
 | 用户统计 | `user_statistics` | 按用户/群的粗略统计 |
+| 角色动态状态 | `novel_character_state` | 叙事调度闭环：按书按角色的可变状态 JSON（态度、记忆碎片等） |
 
 **关系约定（无外键声明，由应用层维护）**
 
@@ -28,10 +29,24 @@
 - `consistency_alert.novel_id` → `novel.id`
 - `plot_snapshot.novel_id` → `novel.id`
 - `generation_task.novel_id` → `novel.id`
+- `novel_character_state.novel_id` → `novel.id`
 
 ---
 
 ## 2. 表结构明细
+
+### 2.x `novel_character_state`（JPA：`NovelCharacterState`）
+
+| 列名 | Java 字段 | 约束 / 说明 |
+|------|-----------|-------------|
+| `id` | `id` | PK，`IDENTITY` |
+| `novel_id` | `novelId` | `NOT NULL` |
+| `character_key` | `characterKey` | `NOT NULL`，与角色档案主名规范化一致 |
+| `state_json` | `stateJson` | `TEXT`，柔性 JSON |
+| `updated_at` | `updatedAt` | 更新时间 |
+| `source_chapter` | `sourceChapter` | 可选，最近一次增量来源章节号 |
+
+**索引**：`idx_ncs_novel_key`（`novel_id`, `character_key`）唯一。
 
 ### 2.1 `novel`
 

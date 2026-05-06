@@ -49,6 +49,13 @@ public class NovelOutlineConfigController {
     @Value("${novel.outline.graph-phase-max-tokens:3600}")
     private int outlineGraphPhaseMaxTokens;
 
+    @Value("${novel.generation.character-cast-enabled:false}")
+    private boolean characterCastEnabled;
+    @Value("${novel.generation.character-state-inject-enabled:false}")
+    private boolean characterStateInjectEnabled;
+    @Value("${novel.generation.character-state-delta-enabled:false}")
+    private boolean characterStateDeltaEnabled;
+
     /**
      * 联调用：返回与 UI 校验相关的服务端配置快照（无密钥）。与 web-agent「前端对接需求」§4.6 对齐。
      */
@@ -73,6 +80,9 @@ public class NovelOutlineConfigController {
         result.put("m9CrosscutEnabled", m9CrosscutEnabled);
         result.put("outlineTwoPhaseGraphEnabled", outlineTwoPhaseGraphEnabled);
         result.put("outlineGraphPhaseMaxTokens", outlineGraphPhaseMaxTokens);
+        result.put("characterCastEnabled", characterCastEnabled);
+        result.put("characterStateInjectEnabled", characterStateInjectEnabled);
+        result.put("characterStateDeltaEnabled", characterStateDeltaEnabled);
         return result;
     }
 
