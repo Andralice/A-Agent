@@ -42,6 +42,10 @@ public class Chapter {
     @Column(name = "write_state", nullable = false, length = 48, columnDefinition = "varchar(48) NOT NULL DEFAULT 'READY'")
     private String writeState = ChapterWriteState.READY.name();
 
+    /** 本章主导情节线：{@link StoryStrand} 名称（QUEST/FIRE/CONSTELLATION）。 */
+    @Column(name = "dominant_strand", length = 24)
+    private String dominantStrand;
+
     @Column(name = "write_state_updated_at")
     private LocalDateTime writeStateUpdatedAt;
 

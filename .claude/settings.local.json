@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn compile *)",
+      "Bash(mvn package *)",
+      "Bash(ls -la /tmp/ 2>/dev/null)",
+      "Read(//d/tmp/**)",
+      "Bash(find / -type d -name \"webnovel-writer\" 2>/dev/null | head -20)",
+      "Read(//d//**)"
+    ]
+  }
+}

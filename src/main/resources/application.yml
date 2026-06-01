@@ -34,8 +34,8 @@ spring:
       chat:
         options:
           model: claude-sonnet-4-6
-          temperature: 0.8
-          max-tokens: 4096
+          temperature: 0.85
+          max-tokens: 8192
           # 单次 HTTP 读超时（含润色等所有 chat）；过大易挂死过久，过小易误判；可配 300s~600s 与 novel.llm.polish-max-attempts 联用
           timeout: 1800s
 
@@ -54,7 +54,11 @@ qq:
 novel:
   # 章节流水线：false 则跳过「文笔润色」整段 LLM（仍保留内容审核与后续终稿等步骤）
   generation:
+    # "黄金三章"开篇策略：前N章注入留存提示块（差异化节奏/信息密度/钩子策略）；设0关闭
+    opening-chapters-count: 5
     polish-enabled: true
+    # 终稿去 AI 味：关掉可保留更多文风棱角（Claude 本身 AI 腔较轻，建议先关）
+    de-ai-enabled: false
     # —— 角色叙事调度（本章登场 focus + 动态状态注入 + 落库后增量）；下述三开关当前为开；若需与旧版一致可改回 false
     # 本章 JSON：`chapterSetting` 可为 {"notes":"…","chapterCast":{"characters":[{"name":"…","focus":["…"]}],"restrictOthersToBackground":true}}
     # 全书默认：`writingStyleParams` 根键 chapterCastDefault（结构同 chapterCast）
@@ -64,7 +68,7 @@ novel:
     character-state-inject-enabled: true
     character-state-inject-max-chars: 3500
     character-state-delta-enabled: true
-    character-state-delta-temperature: 0.25
+    character-state-delta-temperature: 0.6
     character-state-delta-max-tokens: 1200
   auto-continue:
     default-target: 20
@@ -80,10 +84,14 @@ novel:
     polish-max-attempts: 3
     # 两次润色尝试之间的等待（5 分钟 = 300000 ms）
     polish-retry-delay-ms: 300000
-    polish-max-tokens: 4096
-    polish-temperature: 0.8
+    polish-max-tokens: 8192
+    polish-temperature: 0.85
     chat-max-attempts: 3
     chat-retry-delay-ms: 1000
+    chat-temperature: 0.85
+    # true 时将大纲/初稿/角色/终稿/一致性修复等核心 prompt 写入目录（不含润色，润色另有配置）
+    chat-debug-dump-enabled: true
+    chat-debug-dump-dir: logs/chat-debug
     planner-max-attempts: 3
     planner-retry-delay-ms: 1000
   # 大纲生成：防止模型把全书主线压缩成十几～二十章；可调高以更强约束长篇分期
@@ -92,9 +100,9 @@ novel:
     min-roadmap-chapters: 120
     # 两阶段大纲（效果最好）：先专用调用产出冲突图谱 JSON，再生成 Markdown 大纲并锚定该 JSON；失败则自动退回单阶段
     two-phase-graph-enabled: true
-    graph-phase-temperature: 0.35
+    graph-phase-temperature: 0.7
     # cast 角色表加入图谱后输出更长，略抬高上限减少截断
-    graph-phase-max-tokens: 3600
+    graph-phase-max-tokens: 4096
     # 图谱阶段 LLM 调用：瞬时网络错误（如 Connection reset）时最多尝试次数（含首次）；用尽后退回单阶段大纲
     graph-phase-max-attempts: 3
     # 图谱阶段两次尝试之间的等待（毫秒）；可与网关/CDN 恢复节奏对齐
@@ -111,18 +119,18 @@ novel:
     two-phase-enabled: true
     # 轻小说已开「章拍规划」时默认不再跑叙事 Planner，避免两套节拍；设 false 可双开（更贵）
     two-phase-skip-with-light-novel-plan: true
-    planner-temperature: 0.35
+    planner-temperature: 0.7
     planner-max-tokens: 1200
     # 叙事阻力层：Planner JSON 增加障碍字段；未返回时初稿仍注入默认「非最优路径」约束（省时可关）
     resistance-layer-enabled: true
     # 流体润滑 Pass：终稿去 AI 味之后、Lint 之前；只加过渡与感知缓冲，不改剧情（省时可关）
-    flow-pass-enabled: true
-    flow-pass-temperature: 0.35
+    flow-pass-enabled: false
+    flow-pass-temperature: 0.7
     flow-pass-max-tokens: 4096
     # M3：终稿后扫描禁止短语/标签句；命中时可选窄幅修订（多一次模型调用）
     lint-enabled: true
-    lint-fix-enabled: true
-    lint-fix-temperature: 0.35
+    lint-fix-enabled: false
+    lint-fix-temperature: 0.7
     lint-fix-max-tokens: 4096
     # M4：章节成功落库后更新书本级承接摘要，下一章初稿注入（关闭则不更新、不注入）
     m4-carryover-enabled: true
@@ -131,14 +139,53 @@ novel:
     # M9：章节成功落库后聚合跨章叙事状态 JSON 写入 novel.narrative_state_json（含 relationshipHints、tensionRippleHint、schemaVersion）；GET .../narrative-state；下一章初稿附带快照摘录
     m9-crosscut-enabled: true
     # M8：Lint 之后可选「批评」JSON pass + 按严重度触发一轮窄幅重写（多 1～2 次模型调用）
-    m8-critic-enabled: true
-    m8-rewrite-enabled: true
-    m8-critic-temperature: 0.25
+    m8-critic-enabled: false
+    m8-rewrite-enabled: false
+    m8-critic-temperature: 0.6
     m8-critic-max-tokens: 1500
-    m8-rewrite-temperature: 0.35
+    m8-rewrite-temperature: 0.7
     m8-rewrite-max-tokens: 4096
     # 触发重写所需最低 issue 严重度：low | medium | high（或 低/中/高）
     m8-rewrite-min-severity: medium
+
+  # ═══ 故事契约系统 (Story Contract System) ═══
+  story-contract:
+    enabled: true
+    master-setting-required: true
+
+  # ═══ 三股线节奏 (Strand Weave) ═══
+  strand-weave:
+    enabled: true
+    quest-max-consecutive: 5
+    fire-max-gap: 10
+    constellation-max-gap: 15
+
+  # ═══ 伏笔管理 (Foreshadowing) ═══
+  foreshadowing:
+    enabled: true
+    auto-extract: true
+    urgency-escalation-chapters: 20
+
+  # ═══ 阅读力分类法 (Reading Power) ═══
+  reading-power:
+    enabled: true
+    micro-payoff-min-per-chapter: 1
+
+  # ═══ 写作知识库 (RAG Knowledge) ═══
+  knowledge:
+    csv-path: classpath:knowledge/
+    search-strategy: bm25
+
+  # ═══ 章节提交审计链 (Commit Chain) ═══
+  commit-chain:
+    enabled: true
+    require-review-before-commit: true
+
+  # ═══ 反AI味检测 (Anti-AI Flavor) ═══
+  anti-ai:
+    enabled: true
+    force-check: true
+    block-on-high: true
 
 # HTTP 书库：管理员 JWT + 小说「公共/仅管理员」开关；关闭 enabled 则行为与旧版一致（全部可见、无登录）
 # 以下为默认内置账号（明文仅便于本地/内网；公网部署请务必改成强密码并勿提交仓库）

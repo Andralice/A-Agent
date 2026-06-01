@@ -21,6 +21,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 /**
  * 生成任务编排与恢复：创建任务、更新进度、应用启动后续跑 PENDING/RUNNING、并发区间冲突检测辅助。
@@ -45,16 +47,19 @@ public class GenerationTaskService {
     private final ChapterRepository chapterRepository;
     private final NovelAgentService novelAgentService;
     private final ObjectMapper objectMapper;
+    private final Executor generationExecutor;
     private final Set<Long> inProcessTaskIds = ConcurrentHashMap.newKeySet();
 
     public GenerationTaskService(GenerationTaskRepository generationTaskRepository,
                                  ChapterRepository chapterRepository,
                                  NovelAgentService novelAgentService,
-                                 ObjectMapper objectMapper) {
+                                 ObjectMapper objectMapper,
+                                 @Qualifier("generationExecutor") Executor generationExecutor) {
         this.generationTaskRepository = generationTaskRepository;
         this.chapterRepository = chapterRepository;
         this.novelAgentService = novelAgentService;
         this.objectMapper = objectMapper;
+        this.generationExecutor = generationExecutor;
     }
 
     /**
@@ -180,7 +185,7 @@ public class GenerationTaskService {
     }
 
     public void executeAsync(Long taskId) {
-        CompletableFuture.runAsync(() -> executeTask(taskId));
+        CompletableFuture.runAsync(() -> executeTask(taskId), generationExecutor);
     }
 
     /** 运维按钮：若任务处于 PENDING，可手动触发一次执行。 */

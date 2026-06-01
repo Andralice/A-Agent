@@ -134,6 +134,10 @@ public class NovelGenerationAgent {
     @Value("${novel.narrative-engine.flow-pass-max-tokens:4096}")
     private int narrativeFlowPassMaxTokens;
 
+    /** 开篇章节数：前N章注入"黄金三章"留存策略提示块。 */
+    @Value("${novel.generation.opening-chapters-count:5}")
+    private int openingChaptersCount;
+
     /** 大纲：开篇须逐章细纲覆盖的最少章数。 */
     @Value("${novel.outline.detailed-prefix-chapters:40}")
     private int outlineDetailedPrefixChapters;
@@ -171,11 +175,22 @@ public class NovelGenerationAgent {
     @Value("${novel.llm.chat-retry-delay-ms:1000}")
     private long llmChatRetryDelayMs;
 
+    /** {@link #callAi} 使用的温度（初稿/大纲/角色等）；与润色/Planner 等专用温度独立。 */
+    @Value("${novel.llm.chat-temperature:0.85}")
+    private double llmChatTemperature;
+
+    /** 开启后将 {@link #callAi} 完整 prompt 写入目录，便于复现与调优。 */
+    @Value("${novel.llm.chat-debug-dump-enabled:false}")
+    private boolean chatDebugDumpEnabled;
+
+    @Value("${novel.llm.chat-debug-dump-dir:logs/chat-debug}")
+    private String chatDebugDumpDir;
+
     /**
      * 初稿 strip 后低于该字数则触发补救调用（避免模型只输出一两句）。
-     * 与提示词中「总字数 2000-3000」配套；默认 1600 略低于目标下限以便兼容略有短缺。
+     * 与提示词中「总字数 3000-5000」配套；默认 2600 略低于目标下限以便兼容略有短缺。
      */
-    @Value("${novel.llm.chapter-draft-min-chars:1600}")
+    @Value("${novel.llm.chapter-draft-min-chars:2600}")
     private int chapterDraftMinChars;
 
     /** 初稿过短时额外 full-prompt 补救次数（不含首次生成）。 */
@@ -206,6 +221,10 @@ public class NovelGenerationAgent {
     /** false 时跳过步骤4文笔润色（直连模型仍慢或多任务抢占时可显著缩短单章耗时）。 */
     @Value("${novel.generation.polish-enabled:true}")
     private boolean generationPolishEnabled;
+
+    /** false 时跳过步骤5中的「终稿去AI味」，保留更多文风棱角。 */
+    @Value("${novel.generation.de-ai-enabled:true}")
+    private boolean generationDeAiEnabled;
 
     public NovelGenerationAgent(
             ChatClient.Builder chatClientBuilder,
@@ -497,6 +516,21 @@ public class NovelGenerationAgent {
     /**
      * 两阶段大纲图谱中的结构化角色表 {@code cast}（可与 Markdown 大纲、角色档案生成对齐）。
      */
+    /** 清洗角色名：去除常见描述性后缀与括号注释。仅当原名字长度≥5且清洗后仍有有效字符时才执行裁剪，避免短名误杀。 */
+    static String sanitizeCharacterName(String raw) {
+        if (raw == null || raw.isBlank()) return raw;
+        String s = raw.trim();
+        // 去掉括号内的描述
+        s = s.replaceAll("[（(][^)）]*[)）]", "");
+        String cleaned = s.trim();
+        // 仅对长名执行后缀清洗：正常中文名≤4字，≥5字且以描述性后缀结尾才可能污染
+        if (cleaned.length() >= 5) {
+            cleaned = cleaned.replaceAll("(精灵|人类|兽人|矮人|龙族|魔族|神族)?(形态|状态|模式|本体|化身|分身|角色|人物|战士|法师|盗贼|牧师|猎人|版型|版|型式|式样)$", "");
+            cleaned = cleaned.trim();
+        }
+        return cleaned.isEmpty() ? raw.trim() : cleaned;
+    }
+
     private boolean validateOutlineCast(JsonNode root) {
         JsonNode cast = root.path("cast");
         if (!cast.isArray() || cast.size() < 4) {
@@ -510,10 +544,18 @@ public class NovelGenerationAgent {
             if (c == null || !c.isObject()) {
                 return false;
             }
-            String name = c.path("name").asText("").trim();
+            String name = sanitizeCharacterName(c.path("name").asText("").trim());
             if (name.isEmpty() || name.length() > 80) {
                 log.warn("【大纲图谱】cast 项 name 无效");
                 return false;
+            }
+            String originalName = c.path("name").asText("").trim();
+            if (!originalName.equals(name)) {
+                log.warn("【大纲图谱】cast 项 name 已清洗: '{}' -> '{}'", originalName, name);
+                // 回写清洗后的名字到 JSON
+                if (c instanceof com.fasterxml.jackson.databind.node.ObjectNode on) {
+                    on.put("name", name);
+                }
             }
             if (!names.add(name)) {
                 log.warn("【大纲图谱】cast 姓名重复: {}", name);
@@ -528,6 +570,16 @@ public class NovelGenerationAgent {
             if (!c.has("knowledge")) {
                 log.warn("【大纲图谱】cast 项缺少 knowledge 键");
                 return false;
+            }
+            String gender = c.path("gender").asText("").trim();
+            if (gender.isEmpty()) {
+                log.warn("【大纲图谱】cast 项 {} 缺少 gender（非致命，继续）", name);
+            }
+            if (c.path("age").asText("").trim().isEmpty()) {
+                log.warn("【大纲图谱】cast 项 {} 缺少 age（非致命，继续）", name);
+            }
+            if (c.path("appearance").asText("").trim().isEmpty()) {
+                log.warn("【大纲图谱】cast 项 {} 缺少 appearance（非致命，继续）", name);
             }
             String role = c.path("role").asText("").trim().toLowerCase(Locale.ROOT);
             if (roleContainsProtagonist(role)) {
@@ -583,45 +635,9 @@ public class NovelGenerationAgent {
      * 大纲图谱专用调用：遇网络 I/O 异常或空响应时按配置重试（校验失败不计入此处，由上层退回单阶段）。
      */
     private String callAiOutlineGraph(String prompt) {
-        log.debug("【大纲图谱】提示词长度: {} 字符", prompt.length());
-        OpenAiChatOptions opts = OpenAiChatOptions.builder()
-                .temperature(Math.max(0, Math.min(2, outlineGraphPhaseTemperature)))
-                .maxTokens(Math.max(512, Math.min(8192, outlineGraphPhaseMaxTokens)))
-                .build();
-        int max = Math.max(1, Math.min(10, outlineGraphPhaseMaxAttempts));
-        long delayMs = Math.max(0L, outlineGraphPhaseRetryDelayMs);
-        Exception lastException = null;
-        for (int attempt = 1; attempt <= max; attempt++) {
-            long t0 = System.currentTimeMillis();
-            try {
-                String result = chatClient.prompt(prompt).options(opts).call().content();
-                long elapsed = System.currentTimeMillis() - t0;
-                if (result != null && !result.isBlank()) {
-                    log.info("【大纲图谱】✅ 第一阶段完成 - 第 {}/{} 次尝试 - 本请求耗时: {}ms, 长度: {}",
-                            attempt, max, elapsed, result.length());
-                    return result;
-                }
-                log.warn("【大纲图谱】第一阶段返回空文本 - 第 {}/{} 次尝试 - 本请求耗时: {}ms", attempt, max, elapsed);
-            } catch (Exception e) {
-                lastException = e;
-                long elapsed = System.currentTimeMillis() - t0;
-                log.warn("【大纲图谱】❌ 第一阶段失败 - 第 {}/{} 次尝试 - 本请求耗时: {}ms, {}",
-                        attempt, max, elapsed, e.getMessage());
-            }
-            if (attempt < max && delayMs > 0) {
-                try {
-                    Thread.sleep(delayMs);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    log.warn("【大纲图谱】重试等待被中断，停止图谱阶段重试");
-                    break;
-                }
-            }
-        }
-        if (lastException != null) {
-            log.warn("【大纲图谱】第一阶段已用尽 {} 次尝试（最后一次异常: {}）", max, lastException.getMessage());
-        }
-        return "";
+        return retryLlmCall(prompt, System.currentTimeMillis(), new LlmRetryConfig(
+                outlineGraphPhaseMaxAttempts, outlineGraphPhaseRetryDelayMs, outlineGraphPhaseTemperature,
+                outlineGraphPhaseMaxTokens, "【大纲图谱】", false));
     }
 
     public String generateChapter(String outline, int chapterNumber, String previousContent, String nextContent,
@@ -779,12 +795,10 @@ public class NovelGenerationAgent {
                 if (!microPolish.isBlank()) {
                     polishingOutline = polishingOutline + "\n\n" + microPolish;
                 }
-                String prosePolishBlock = NarrativeCraftPrompts.proseCraftPolishBlock(proseCraftResolver.resolve(writingStyleParamsJson));
                 final String polishingOutlineFinal = polishingOutline + "\n\n【文风流水线】\n" + styleGuide(pipeline)
                         + (narrativeEngineEnabled && effectiveProfile != null
                         ? NarrativeCraftPrompts.narrativeEnginePolishReminder(effectiveProfile, pipeline, effectivePhysics)
-                        : "")
-                        + (prosePolishBlock.isBlank() ? "" : "\n\n" + prosePolishBlock);
+                        : "");
                 int polishBgLen = polishingOutlineFinal.strip().length();
                 String polishContext = clipPolishContext(polishContextMaxChars, polishingOutlineFinal);
                 if (polishContextMaxChars > 0 && polishBgLen > polishContextMaxChars) {
@@ -802,7 +816,13 @@ public class NovelGenerationAgent {
             throwIfChapterAborted(chapterAbortRequested);
             log.info("【步骤5/5】进行最终内容审核...");
             String reviewedFinalContent = safeStep("最终审核", () -> reviewAgent.reviewAndFix(polishedContent), polishedContent);
-            String finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics), reviewedFinalContent);
+            String finalContent;
+            if (!generationDeAiEnabled) {
+                log.info("【步骤5/5】已跳过终稿去AI味（novel.generation.de-ai-enabled=false），沿用最终审核结果");
+                finalContent = reviewedFinalContent;
+            } else {
+                finalContent = safeStep("终稿去AI味", () -> deAiFinalize(reviewedFinalContent, chapterNumber, pipeline, hotMemeEnabled, styleHints, effectiveProfile, effectivePhysics), reviewedFinalContent);
+            }
             log.info("【步骤5/5】✅ 最终审核完成，长度: {} 字符", finalContent.length());
 
             throwIfChapterAborted(chapterAbortRequested);
@@ -997,7 +1017,6 @@ public class NovelGenerationAgent {
         log.info("【🤖 创作Agent】开始生成第{}章初稿", chapterNumber);
         long startTime = System.currentTimeMillis();
         CognitionArcSnapshot cognitionArc = cognitionArcResolver.resolve(writingStyleParamsJson);
-        ProseCraftSnapshot proseCraft = proseCraftResolver.resolve(writingStyleParamsJson);
         String draftRules = NarrativeCraftPrompts.chapterDraftHardRules(pipeline)
                 + "\n" + NarrativeCraftPrompts.chapterReaderEngagementBlock(pipeline)
                 + "\n" + NarrativeCraftPrompts.chapterTacticalCommandAntiTemplateBlock();
@@ -1021,6 +1040,11 @@ public class NovelGenerationAgent {
             if (!carryBlock.isBlank()) {
                 draftRules = draftRules + "\n" + carryBlock;
             }
+        }
+
+        String openingBlock = NarrativeCraftPrompts.chapterOpeningStrategyBlock(chapterNumber, pipeline, openingChaptersCount);
+        if (!openingBlock.isBlank()) {
+            draftRules = draftRules + "\n\n" + openingBlock;
         }
 
         WritingPipeline draftPipeline = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
@@ -1051,18 +1075,7 @@ public class NovelGenerationAgent {
             }
         }
 
-        if (cognitionArc.enabled()) {
-            String cogBlock = NarrativeCraftPrompts.cognitionArcChapterBlock(cognitionArc);
-            if (cogBlock != null && !cogBlock.isBlank()) {
-                draftRules = draftRules + "\n\n" + cogBlock;
-            }
-        }
-        if (proseCraft.enabled()) {
-            String proseBlock = NarrativeCraftPrompts.proseCraftChapterBlock(proseCraft);
-            if (proseBlock != null && !proseBlock.isBlank()) {
-                draftRules = draftRules + "\n\n" + proseBlock;
-            }
-        }
+        // 认知弧线与文笔四层已不再注入初稿——与叙述者人格的"不工整"指令冲突
 
         boolean skipNarrativePlanner = !narrativeTwoPhaseEnabled || !narrativeEngineEnabled || narrativeProfile == null
                 || (narrativeTwoPhaseSkipWithLightNovelPlan
@@ -1107,7 +1120,10 @@ public class NovelGenerationAgent {
                 ? "【上一章衔接材料（结构化摘要+尾声节选｜禁止整章复述扩写）】"
                 : "【上一章内容回顾】";
 
+        String narratorPersona = NarrativeCraftPrompts.narratorPersonaBlock();
         String prompt = String.format("""
+            %s
+
             你是一位精通网文节奏的顶级作家，采用"生态型AI"创作模式。
 
             【重要要求】
@@ -1142,15 +1158,21 @@ public class NovelGenerationAgent {
             【下一章已存在内容（若为中间重生必须兼容）】
             %s
 
+            【主角驱动力（本章最关键的规则——违反此条则本章不成立）】
+            - 主角在本章必须**主动做出至少一个选择**。不是「被动逃命」「被迫反击」「别人告诉他该做什么」——而是他面对两个选项，选了其中一个，并因为这个选择产生了**可见的后果**。
+            - 这个选择可以小（信不信任一个人、走左边还是右边、说真话还是隐瞒），但必须有。选择之后必须有当场可感知的结果（关系变了、情报到手或错过、处境好转或恶化）。
+            - 如果本章没有主角主动选择，整章视为不合格。禁止用「他感到」「他意识到」「他决定」等内心独白代替实际行动。
+
             【本章创作结构】
             1. 钩子：开篇给出危机、异常、压迫、误解或悬念。
             2. 压制：让主角面对困难或不公，但**用场面写体感**（对话顶撞、生理紧张、具体损失），避免只有交代设定没有心跳。
-            3. 反转触发：用**情节层面的变化**制造跌宕（局势改写、信息翻盘、关键选择及后果、关系破裂或结盟等），至少一处要落在具体事件上；勿用密集「然而/其实/并非而是」类旁白句式替真正的剧情反转。
-            4. 高潮爆发：冲突集中释放时，**情绪跟人物走**（台词、动作、后果），不单是旁白形容「很强很恐怖」。
-            5. 余震：留下后续悬念，不要总结人生意义。
+            3. 转折点=主角的选择：在本章中段之前，主角必须做出一个具体行动决策（对抗/妥协/欺骗/求助/说出真相其一），这个决策改变局面走向。注意——是这个决策改变局面，不是旁白形容局面变了。
+            4. 高潮爆发：选择后的后果集中释放，**情绪跟人物走**（台词、动作、后果），不单是旁白形容「很强很恐怖」。
+            5. 余震：留下后续悬念——这个选择带来的新问题是什么？不要总结人生意义。
 
             【写作风格】
-            - 总字数 2000-3000 字；禁止只输出片段、单段意象或一两句就收束。正文去首尾空白后若少于 %d 字视为不合格，须写满后再输出。
+            - 总字数 3000-5000 字；禁止只输出片段、单段意象或一两句就收束。正文去首尾空白后若少于 %d 字视为不合格，须写满后再输出。
+            - **收束纪律**：若写到接近字数上限时当前场面仍未完结，优先用 1-2 句话收束当前场面（动作落点、关系进退、悬念暗示任选其一），**禁止正文断在半个句子或半个动作中间**。宁可稍短也要完整。
             - 长短句交错，允许情绪断裂；关键段落可有明显的快慢对比，避免通篇一个调门。
             - 加入1-2个真实生活细节。
             - 对话自然，人物行为符合设定但允许合理的矛盾和复杂性。
@@ -1159,7 +1181,7 @@ public class NovelGenerationAgent {
             - 中间章节重生时，严禁推翻下一章已确定的关键事实（人物生死、地点、关键道具归属、阵营关系）。
 
             现在开始创作第%d章：
-            """, draftRules,
+            """, narratorPersona, draftRules,
                 outline,
                 narrativeSchedulingSection(characterNarrativeContextBlock),
                 characterProfile,
@@ -1178,7 +1200,7 @@ public class NovelGenerationAgent {
     }
 
     private static int clampChapterDraftMinChars(int raw) {
-        return Math.max(200, Math.min(12000, raw));
+        return Math.max(500, Math.min(8000, raw));
     }
 
     private static int clampChapterDraftShortRetries(int raw) {
@@ -1207,7 +1229,7 @@ public class NovelGenerationAgent {
                     【硬性补救｜上次输出不合格】
                     你在上文指令之后给出的正文过短（去首尾空白仅约 %d 个有效字符），视同未完成本章。
                     你必须重新输出**完整第%d章正文**（仅小说正文，不要重复系统提示、不要markdown围栏、不要评语）。
-                    - strip 后不少于 %d 字（目标仍建议 2000～3000 字）。
+                    - strip 后不少于 %d 字（目标仍建议 3000～5000 字）。
                     - 须有完整起承转合：钩子→事态推进→至少一处剧情层面的波折或信息变化→章末悬念。
                     - 若上一稿有可保留的情节或意象，请扩展并入全章，禁止只粘贴一两句。
                     """.formatted(len, chapterNumber, min);
@@ -1309,16 +1331,23 @@ public class NovelGenerationAgent {
 
                 【输出格式要求】
                 你必须只输出 JSON，且只能输出一个 JSON 对象，格式如下：
+                【name 字段硬规则】
+                - name 只能是角色的**真实姓名或唯一绰号**（如"林晓""洛祁""弥亚"），**严禁**包含任何描述性后缀或括号注释。
+                - 错误示例："林晓（精灵形态）""艾伦人类战士""苏茗店主"——这些都**绝对禁止**。
+                - 正确示例："林晓""艾伦""苏茗"。角色的种族、职业、形态等信息应写在 type/summary/voice 中，**不得**混入 name。
                 {
                   "characters": [
                     {
-                      "name": "角色名",
+                      "name": "角色真实姓名或唯一绰号（禁止加任何括号注释或描述后缀）",
+                      "gender": "男/女/其他（必填）",
+                      "age": "具体数字或范围（必填，如 26 / 看上去30出头 / 外表14岁实际300岁）",
+                      "appearance": "外貌一句话（必填，含身高体型、发色发型、标志性特征，如「清瘦高挑，黑长直，左眉尾有疤」）",
                       "type": "主角/配角/反派/下属单位/操作席位/子智能体（按人设）",
                       "want": "...",
                       "fear": "...",
                       "knowledge": "...",
                       "voice": "对白声纹（必填）：句长、称谓、口癖、报数习惯、情绪温度、坏消息说法等，可与其它角色明显区分",
-                      "summary": "简短角色简介（职能与剧情作用，勿与 voice 重复空话）"
+                      "summary": "简短角色简介（职能与剧情作用，勿与 voice/appearance 重复空话）"
                     }
                   ]
                 }
@@ -1353,41 +1382,32 @@ public class NovelGenerationAgent {
     }
 
     private String callAi(String prompt, long startTime, String actionName) {
-        log.debug("【🤖 AI调用】{}提示词长度: {} 字符", actionName, prompt.length());
-        int max = Math.max(1, Math.min(10, llmChatMaxAttempts));
-        long delayMs = Math.max(0L, llmChatRetryDelayMs);
-        Exception lastException = null;
-        for (int attempt = 1; attempt <= max; attempt++) {
-            long t0 = System.currentTimeMillis();
-            try {
-                String result = chatClient.prompt(prompt).call().content();
-                long reqElapsed = System.currentTimeMillis() - t0;
-                if (result != null && !result.isBlank()) {
-                    long totalElapsed = System.currentTimeMillis() - startTime;
-                    log.info("【🤖 AI调用】✅ {}成功 - 第 {}/{} 次 - 本请求: {}ms, 累计: {}ms, 长度: {} 字符",
-                            actionName, attempt, max, reqElapsed, totalElapsed, result.length());
-                    return result;
-                }
-                log.warn("【🤖 AI调用】{}返回空 - 第 {}/{} 次 - 本请求: {}ms", actionName, attempt, max, reqElapsed);
-            } catch (Exception e) {
-                lastException = e;
-                long reqElapsed = System.currentTimeMillis() - t0;
-                log.warn("【🤖 AI调用】❌ {}失败 - 第 {}/{} 次 - 本请求: {}ms, {}",
-                        actionName, attempt, max, reqElapsed, e.getMessage());
-            }
-            if (attempt < max && delayMs > 0) {
-                sleepForLlmRetry(delayMs, "【🤖 AI调用】" + actionName);
-            }
+        return retryLlmCall(prompt, startTime, new LlmRetryConfig(
+                llmChatMaxAttempts, llmChatRetryDelayMs, llmChatTemperature, null,
+                "【🤖 AI调用】" + actionName, true));
+    }
+
+    /** 与润色 debug dump 同款：将完整 prompt 写入文件，便于 Playground 复现。 */
+    private void maybeDumpChatPrompt(String actionName, String prompt) {
+        if (!chatDebugDumpEnabled || prompt == null) return;
+        try {
+            java.nio.file.Path dir = java.nio.file.Paths.get(chatDebugDumpDir).toAbsolutePath().normalize();
+            java.nio.file.Files.createDirectories(dir);
+            String safeName = actionName.replaceAll("[^a-zA-Z0-9\\u4e00-\\u9fa5_-]", "_");
+            String ts = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+            String fn = String.format("chat-%s-%s-%d.txt", safeName, ts, System.nanoTime());
+            java.nio.file.Path file = dir.resolve(fn);
+            String header = """
+                    # chat 调用快照
+                    action=%s
+                    promptChars=%d
+                    ---
+                    """.formatted(actionName, prompt.length());
+            java.nio.file.Files.writeString(file, header + prompt, java.nio.charset.StandardCharsets.UTF_8);
+            log.warn("【Chat调试】已写出完整 prompt: {}", file);
+        } catch (Exception e) {
+            log.warn("【Chat调试】写出 prompt 失败: {}", e.getMessage());
         }
-        long totalElapsed = System.currentTimeMillis() - startTime;
-        log.error("【🤖 AI调用】❌ {}已用尽 {} 次尝试 - 累计: {}ms", actionName, max, totalElapsed, lastException);
-        if (lastException != null) {
-            if (lastException instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            throw new RuntimeException(lastException);
-        }
-        throw new IllegalStateException(actionName + "：LLM 返回为空（已重试 " + max + " 次）");
     }
 
     /**
@@ -1401,107 +1421,37 @@ public class NovelGenerationAgent {
     }
 
     private String callAiCharacterStateDelta(String prompt, long startTime) {
-        log.debug("【角色状态增量】提示词长度: {} 字符", prompt.length());
-        OpenAiChatOptions opts = OpenAiChatOptions.builder()
-                .temperature(Math.max(0, Math.min(1, characterStateDeltaTemperature)))
-                .maxTokens(Math.max(256, Math.min(4096, characterStateDeltaMaxTokens)))
-                .build();
-        int max = Math.max(1, Math.min(10, llmChatMaxAttempts));
-        long delayMs = Math.max(0L, llmChatRetryDelayMs);
-        Exception lastException = null;
-        for (int attempt = 1; attempt <= max; attempt++) {
-            long t0 = System.currentTimeMillis();
-            try {
-                String result = chatClient.prompt(prompt).options(opts).call().content();
-                long reqElapsed = System.currentTimeMillis() - t0;
-                if (result != null && !result.isBlank()) {
-                    log.info("【角色状态增量】✅ 第 {}/{} 次 - {}ms, 长度 {}",
-                            attempt, max, reqElapsed, result.length());
-                    return result;
-                }
-            } catch (Exception e) {
-                lastException = e;
-                log.warn("【角色状态增量】❌ 第 {}/{} 次: {}", attempt, max, e.getMessage());
-            }
-            if (attempt < max && delayMs > 0) {
-                sleepForLlmRetry(delayMs, "【角色状态增量】");
-            }
-        }
-        log.warn("【角色状态增量】已用尽 {} 次: {}", max, lastException != null ? lastException.getMessage() : "空响应");
-        return "";
+        return retryLlmCall(prompt, startTime, new LlmRetryConfig(
+                llmChatMaxAttempts, llmChatRetryDelayMs, characterStateDeltaTemperature,
+                characterStateDeltaMaxTokens, "【角色状态增量】", false));
     }
 
     /** M2 Planner：低温、短输出；失败不抛给上层。 */
     private String callAiPlanner(String prompt, long startTime, String actionName) {
-        log.debug("【🤖 Planner】{}提示词长度: {} 字符", actionName, prompt.length());
-        OpenAiChatOptions opts = OpenAiChatOptions.builder()
-                .temperature(Math.max(0, Math.min(2, narrativePlannerTemperature)))
-                .maxTokens(Math.max(256, Math.min(4096, narrativePlannerMaxTokens)))
-                .build();
-        int max = Math.max(1, Math.min(10, llmPlannerMaxAttempts));
-        long delayMs = Math.max(0L, llmPlannerRetryDelayMs);
-        Exception lastException = null;
-        for (int attempt = 1; attempt <= max; attempt++) {
-            long t0 = System.currentTimeMillis();
-            try {
-                String result = chatClient.prompt(prompt).options(opts).call().content();
-                long reqElapsed = System.currentTimeMillis() - t0;
-                if (result != null && !result.isBlank()) {
-                    long totalElapsed = System.currentTimeMillis() - startTime;
-                    log.info("【🤖 Planner】✅ {}成功 - 第 {}/{} 次 - 本请求: {}ms, 累计: {}ms, 长度: {} 字符",
-                            actionName, attempt, max, reqElapsed, totalElapsed, result.length());
-                    return result;
-                }
-                log.warn("【🤖 Planner】{}返回空 - 第 {}/{} 次 - 本请求: {}ms", actionName, attempt, max, reqElapsed);
-            } catch (Exception e) {
-                lastException = e;
-                long reqElapsed = System.currentTimeMillis() - t0;
-                log.warn("【🤖 Planner】❌ {}失败 - 第 {}/{} 次 - 本请求: {}ms, {}",
-                        actionName, attempt, max, reqElapsed, e.getMessage());
-            }
-            if (attempt < max && delayMs > 0) {
-                sleepForLlmRetry(delayMs, "【🤖 Planner】" + actionName);
-            }
-        }
-        long totalElapsed = System.currentTimeMillis() - startTime;
-        log.warn("【🤖 Planner】{}已用尽 {} 次尝试，静默跳过 - 累计: {}ms, {}",
-                actionName, max, totalElapsed, lastException != null ? lastException.getMessage() : "空响应");
-        return "";
-    }
-
-    private void sleepForLlmRetry(long delayMs, String logPrefix) {
-        try {
-            Thread.sleep(delayMs);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            log.warn("{} 重试等待被中断", logPrefix);
-        }
+        return retryLlmCall(prompt, startTime, new LlmRetryConfig(
+                llmPlannerMaxAttempts, llmPlannerRetryDelayMs, narrativePlannerTemperature,
+                narrativePlannerMaxTokens, "【🤖 Planner】" + actionName, false));
     }
 
     private String narrativeProfileForPlannerPrompt(NarrativeProfile p) {
         if (p == null) return "（无）";
         StringBuilder sb = new StringBuilder();
-        sb.append("- 主情绪类型：").append(p.emotionType()).append("\n");
-        sb.append(String.format(Locale.ROOT, "- 强度带宽：[%.2f, %.2f]；压抑度：%.2f\n",
-                p.intensityMin(), p.intensityMax(), p.suppression()));
+        sb.append("- 情绪类型：").append(p.emotionType()).append("\n");
+        sb.append("- 情绪质地：").append(NarrativeCraftPrompts.emotionBandDescription(p.emotionType(), p.intensityMin(), p.intensityMax())).append("\n");
         if (p.triggerFact() != null && !p.triggerFact().isBlank()) {
-            sb.append("- 触发事实锚点：").append(p.triggerFact()).append("\n");
+            sb.append("- 情绪锚点：").append(p.triggerFact()).append("\n");
         }
         if (p.rhythmHint() != null && !p.rhythmHint().isBlank()) {
-            sb.append("- 节奏意图：").append(p.rhythmHint()).append("\n");
+            sb.append("- 节奏：").append(p.rhythmHint()).append("\n");
         }
         if (p.textureHint() != null && !p.textureHint().isBlank()) {
-            sb.append("- 语言材质：").append(p.textureHint()).append("\n");
+            sb.append("- 质感：").append(p.textureHint()).append("\n");
         }
         if (p.affection() != null || p.awkwardness() != null || p.assertiveness() != null) {
-            sb.append("- 轻小说微情绪维：");
-            if (p.affection() != null) sb.append(String.format(Locale.ROOT, "好感%.2f ", p.affection()));
-            if (p.awkwardness() != null) sb.append(String.format(Locale.ROOT, "别扭%.2f ", p.awkwardness()));
-            if (p.assertiveness() != null) sb.append(String.format(Locale.ROOT, "主动%.2f", p.assertiveness()));
-            sb.append("\n");
+            sb.append("- 互动分寸：").append(NarrativeCraftPrompts.interactionDescription(p.affection(), p.awkwardness(), p.assertiveness())).append("\n");
         }
         if (!p.forbiddenLines().isEmpty()) {
-            sb.append("- 禁止项：").append(String.join("；", p.forbiddenLines())).append("\n");
+            sb.append("- 避讳：").append(String.join("；", p.forbiddenLines())).append("\n");
         }
         return sb.toString().trim();
     }
@@ -1524,10 +1474,6 @@ public class NovelGenerationAgent {
         String immutableClip = clipForPlan(immutableConstraints, NE_PLAN_IMMUTABLE_CLIP);
         WritingPipeline p = pipeline == null ? WritingPipeline.POWER_FANTASY : pipeline;
         String plannerEngineParams = narrativeProfileForPlannerPrompt(profile);
-        String cognitionPlanner = NarrativeCraftPrompts.cognitionArcPlannerHint(cognitionArc);
-        if (!cognitionPlanner.isBlank()) {
-            plannerEngineParams = plannerEngineParams + "\n\n" + cognitionPlanner;
-        }
         String prompt = String.format("""
                 你是网络小说叙事策划编辑。请只输出一个 JSON 对象，禁止 markdown 代码块、禁止解释前后缀。
 
@@ -1551,8 +1497,14 @@ public class NovelGenerationAgent {
 
                 【文风流水线】%s
 
+                【本章叙事位置】
+                第 %d 章在全书弧线中处于什么阶段？据此调整本章节奏与目标：
+                - 前20%%章节：重在建立角色、展示规则、埋线；主角尚在被动适应，但须有一次小选择展示性格。
+                - 中间章节：矛盾须比前期加剧，角色关系进退，关键信息被揭露；主角的选择开始产生后果。
+                - 靠后章节：伏笔兑现，主角价值观被挑战，选择须有代价。
+
                 【任务】为第 %d 章制定「叙事脚本」（服务于正文写作，不是写正文）：
-                1. mainObjective：本章唯一主线目标，一句话。
+                1. mainObjective：本章唯一主线目标，一句话。必须是主角**主动要做的一件事**（如「套出X的秘密」「拒绝Y的邀请」「用Z筹码交换情报」），禁止写成被动反应（如「躲避追杀」「应对危机」）。
                 2. emotionArc：字符串数组，3～6 条，描述本章情绪走向（可含约强度如「压抑→抬头→回落」），须落在叙事引擎给出的强度带宽内波动，避免全程同一强度。
                 3. beats：3～5 条可演出场面（谁、在哪、发生什么），顺序即正文推荐顺序。
                 4. opening：开场钩子一句话。
@@ -1583,7 +1535,7 @@ public class NovelGenerationAgent {
                 plannerEngineParams,
                 prevClip.isBlank() ? "（无：第1章或无前文）" : prevClip,
                 p.name(),
-                chapterNumber,
+                chapterNumber, chapterNumber,
                 plannerM2ResistanceTaskLines(p));
         try {
             String raw = callAiPlanner(prompt, startTime, "叙事引擎M2章前规划");
@@ -1816,12 +1768,14 @@ public class NovelGenerationAgent {
                 【上一章衔接或回顾材料（勿照搬扩写；规划时考虑连贯即可）】
                 %s
 
+                【本章在大纲中的叙事位置（重要：据此判断本章应完成什么弧线阶段）】
+                第 %d 章属于全书叙事弧线的哪个阶段？请根据大纲判断：
+                - 若本章在「开篇/铺垫」阶段（一般前20%%章节）：重点建立角色关系、展示规则、埋设伏笔；主角此时应仍在被动了解世界，但须在本章做出**至少一次小选择**来展示性格倾向。
+                - 若本章在「发展/升级」阶段（中间章节）：矛盾应比前一个阶段明显加剧，角色关系发生进退，关键信息被揭露；主角的选择须开始**产生后果**，不能选了等于没选。
+                - 若本章在「高潮/转折」阶段：本章须有大体量的事件推进，至少一个主要伏笔被兑现；主角的价值观受到挑战，必须做出**有代价的选择**。
+                - 若本章在「收束/余波」阶段（靠后章节）：兑现先前选择的代价，关系进入新平衡，为下一卷/下一阶段留钩子。
+
                 【任务】为第 %d 章制定写作节拍：
-                1. 本章只能有一条主线目标（mainObjective），所有场面服务这条线。
-                2. beats 数组必须 3～5 条，每条是可演出的具体场面（谁、在哪、发生什么），禁止空话设定清单。
-                3. opening：开场钩子一句话（危机/误会/反常其一）。
-                4. closing：结尾具体的悬念或场面转折一句话；禁止「下一章预告」类元叙事。
-                5. mustAvoid：2～5 条短语，列出衔接材料里已交代、正文禁止再长篇复述的信息点。
 
                 JSON 格式（字段名必须一致）：
                 {
@@ -1838,7 +1792,7 @@ public class NovelGenerationAgent {
                 buildChapterSettingBlock(chapterSetting),
                 buildImmutableConstraintsBlock(immutableClip.isBlank() ? null : immutableClip),
                 prevClip.isBlank() ? "（无：第1章或无前文）" : prevClip,
-                chapterNumber);
+                chapterNumber, chapterNumber);
         try {
             String raw = callAi(prompt, startTime, "轻小说章拍规划");
             String formatted = formatLightNovelPlanJson(raw);
@@ -2009,6 +1963,81 @@ public class NovelGenerationAgent {
         } catch (Exception e) {
             log.warn("【{}】失败，使用回退内容继续流程: {}", stepName, e.getMessage());
             return fallback;
+        }
+    }
+
+    // ──── 泛型 LLM 重试框架 ────
+
+    /** LLM 调用重试配置。 */
+    private record LlmRetryConfig(int maxAttempts, long delayMs, double temperature, Integer maxTokens,
+                                   String logPrefix, boolean rethrowOnExhaustion) {}
+
+    /**
+     * 泛型 LLM 调用重试：统一消灭 callAi / callAiOutlineGraph / callAiPlanner / callAiCharacterStateDelta 的重复代码。
+     * 包含指数退避（jitter）和中断恢复。
+     */
+    private String retryLlmCall(String prompt, long startTime, LlmRetryConfig cfg) {
+        log.debug("【{}】提示词长度: {} 字符", cfg.logPrefix, prompt.length());
+        maybeDumpChatPrompt(cfg.logPrefix, prompt);
+        OpenAiChatOptions.Builder optsBuilder = OpenAiChatOptions.builder()
+                .temperature(Math.max(0, Math.min(2, cfg.temperature)));
+        if (cfg.maxTokens != null) {
+            optsBuilder.maxTokens(Math.max(256, Math.min(8192, cfg.maxTokens)));
+        }
+        OpenAiChatOptions opts = optsBuilder.build();
+        int max = Math.max(1, Math.min(10, cfg.maxAttempts));
+        long baseDelayMs = Math.max(0L, cfg.delayMs);
+        Exception lastException = null;
+        for (int attempt = 1; attempt <= max; attempt++) {
+            long t0 = System.currentTimeMillis();
+            try {
+                String result = chatClient.prompt(prompt).options(opts).call().content();
+                long reqElapsed = System.currentTimeMillis() - t0;
+                if (result != null && !result.isBlank()) {
+                    long totalElapsed = System.currentTimeMillis() - startTime;
+                    log.info("【{}】✅ 成功 - 第 {}/{} 次 - 本请求: {}ms, 累计: {}ms, 长度: {} 字符",
+                            cfg.logPrefix, attempt, max, reqElapsed, totalElapsed, result.length());
+                    return result;
+                }
+                log.warn("【{}】返回空 - 第 {}/{} 次 - 本请求: {}ms", cfg.logPrefix, attempt, max, reqElapsed);
+            } catch (Exception e) {
+                lastException = e;
+                long reqElapsed = System.currentTimeMillis() - t0;
+                log.warn("【{}】❌ 失败 - 第 {}/{} 次 - 本请求: {}ms, {}",
+                        cfg.logPrefix, attempt, max, reqElapsed, e.getMessage());
+            }
+            if (attempt < max && baseDelayMs > 0) {
+                sleepForLlmRetry(attempt, baseDelayMs, cfg.logPrefix);
+            }
+        }
+        long totalElapsed = System.currentTimeMillis() - startTime;
+        if (cfg.rethrowOnExhaustion) {
+            log.error("【{}】❌ 已用尽 {} 次尝试 - 累计: {}ms, {}", cfg.logPrefix, max, totalElapsed, lastException);
+            if (lastException != null) {
+                if (lastException instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                throw new RuntimeException(lastException);
+            }
+            throw new IllegalStateException(cfg.logPrefix + "：LLM 返回为空（已重试 " + max + " 次）");
+        }
+        log.warn("【{}】已用尽 {} 次尝试，静默跳过 - 累计: {}ms, {}",
+                cfg.logPrefix, max, totalElapsed, lastException != null ? lastException.getMessage() : "空响应");
+        return "";
+    }
+
+    /** 带指数退避与 jitter 的重试等待。 */
+    private void sleepForLlmRetry(int attempt, long baseDelayMs, String logPrefix) {
+        // 指数退避：delay = baseDelay * 2^(attempt-1)，上限 60s，加 ±25% jitter
+        long expDelay = baseDelayMs * (1L << Math.min(attempt - 1, 5));
+        long capped = Math.min(expDelay, 60_000L);
+        double jitter = 0.75 + Math.random() * 0.5; // 0.75 ~ 1.25
+        long finalDelay = (long) (capped * jitter);
+        try {
+            Thread.sleep(finalDelay);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            log.warn("{} 重试等待被中断", logPrefix);
         }
     }
 

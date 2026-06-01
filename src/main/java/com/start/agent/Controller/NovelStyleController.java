@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 /**
  * HTTP API：按「文风 URL 段」创建小说并续写，内部映射为 {@link WritingPipeline}。
@@ -29,17 +31,20 @@ public class NovelStyleController {
     private final GenerationTaskService generationTaskService;
     private final NovelLibraryAccessService novelLibraryAccessService;
     private final ObjectMapper objectMapper;
+    private final Executor generationExecutor;
 
     public NovelStyleController(NovelAgentService agentService,
                                 RegenerationTaskGuardService regenerationTaskGuardService,
                                 GenerationTaskService generationTaskService,
                                 NovelLibraryAccessService novelLibraryAccessService,
-                                ObjectMapper objectMapper) {
+                                ObjectMapper objectMapper,
+                                @Qualifier("generationExecutor") Executor generationExecutor) {
         this.agentService = agentService;
         this.regenerationTaskGuardService = regenerationTaskGuardService;
         this.generationTaskService = generationTaskService;
         this.novelLibraryAccessService = novelLibraryAccessService;
         this.objectMapper = objectMapper;
+        this.generationExecutor = generationExecutor;
     }
 
     @PostMapping("/{style}/create")
@@ -57,7 +62,7 @@ public class NovelStyleController {
             String finalStyleJson = styleJson;
             CompletableFuture.runAsync(() -> agentService.processAndSend(0L, request.getTopic(), request.getGenerationSetting(), pipeline, hotMeme, finalStyleJson,
                     request.getSerializationPlatform(), request.getCreatorNote(),
-                    request.getOutlineDetailedPrefixChapters(), request.getOutlineMinRoadmapChapters()));
+                    request.getOutlineDetailedPrefixChapters(), request.getOutlineMinRoadmapChapters()), generationExecutor);
             Map<String, Object> data = new HashMap<>();
             data.put("pipeline", pipeline.name());
             data.put("hotMemeEnabled", hotMeme);
@@ -91,20 +96,11 @@ public class NovelStyleController {
     }
 
     private Map<String, Object> success(String message, Map<String, Object> data) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("status", "success");
-        result.put("code", "OK");
-        result.put("message", message);
-        if (data != null) result.putAll(data);
-        return result;
+        return ApiResponse.success(message, data).toMap();
     }
 
     private Map<String, Object> error(String code, String message) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("status", "error");
-        result.put("code", code);
-        result.put("message", message);
-        return result;
+        return ApiResponse.error(code, message).toMap();
     }
 
     @Data

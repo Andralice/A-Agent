@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 
 /** 连接 NapCat WebSocket，并在就绪时注入 {@link com.start.agent.service.NapCatMessageService}。 */
 @Slf4j
-@Configuration
+@Configuration(proxyBeanMethods = false)
 public class WebSocketConfig {
 
     @Value("${napcat.ws-url:ws://127.0.0.1:5701}")

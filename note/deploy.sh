@@ -109,7 +109,7 @@ case "${DEPLOY_MODE}" in
 esac
 EOS
 
-echo "==> [5/6] 服务器替换 JAR（带备份）"
+echo "==> [5/6] 服务器替换 JAR（带备份，保留最近 3 个）"
 ssh "${REMOTE_USER}@${REMOTE_HOST}" "$(_remote_exports); bash -s" <<'EOS'
 set -euo pipefail
 cd "${REMOTE_DIR}"
@@ -117,6 +117,8 @@ if [[ -f "${JAR_NAME}" ]]; then
   cp "${JAR_NAME}" "${JAR_NAME}.bak.$(date +%Y%m%d_%H%M%S)"
 fi
 mv "${JAR_NAME}.new" "${JAR_NAME}"
+# 只保留最近 3 个备份，删除多余的
+ls -1t "${JAR_NAME}".bak.* 2>/dev/null | tail -n +4 | xargs rm -f
 EOS
 
 echo "==> [6/6] 启动"

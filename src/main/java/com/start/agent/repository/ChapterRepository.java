@@ -38,4 +38,7 @@ public interface ChapterRepository extends JpaRepository<Chapter, Long> {
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("DELETE FROM Chapter c WHERE c.novelId = :novelId")
     void deleteAllByNovelId(@Param("novelId") Long novelId);
+
+    @Query("SELECT COUNT(c) FROM Chapter c WHERE c.novelId = :novelId AND c.dominantStrand = :strand")
+    long countByNovelIdAndDominantStrand(@Param("novelId") Long novelId, @Param("strand") String strand);
 }

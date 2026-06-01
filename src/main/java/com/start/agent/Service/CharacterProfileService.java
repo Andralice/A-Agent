@@ -298,6 +298,10 @@ public class CharacterProfileService {
     private String normalizeName(String candidate) {
         if (candidate == null) return null;
         String normalized = candidate.trim().replaceAll("[^\\p{IsHan}A-Za-z0-9·_]", "");
+        // 清洗描述性后缀（如"林晓精灵形态"→"林晓"），仅对≥5字长名执行避免误杀短名
+        if (normalized.length() >= 5) {
+            normalized = normalized.replaceAll("(精灵|人类|兽人|矮人|龙族|魔族|神族)?(形态|状态|模式|本体|化身|分身|角色|人物|战士|法师|盗贼|牧师|猎人|版型|版|型式|式样)$", "");
+        }
         if (normalized.isEmpty() || UNKNOWN_NAME.equals(normalized) || "完整设定".equals(normalized)) return null;
         if (normalized.length() > 30) normalized = normalized.substring(0, 30);
         return normalized;

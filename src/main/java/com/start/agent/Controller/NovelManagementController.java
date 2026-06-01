@@ -2,7 +2,10 @@ package com.start.agent.controller;
 
 import com.start.agent.model.Chapter;
 import com.start.agent.model.ChapterFact;
+import com.start.agent.model.ChapterRevision;
 import com.start.agent.model.ChapterWriteState;
+import com.start.agent.model.OutlineRevision;
+import com.start.agent.model.CharacterProfileRevision;
 import com.start.agent.model.CharacterProfile;
 import com.start.agent.model.ConsistencyAlert;
 import com.start.agent.model.GenerationLog;
@@ -12,7 +15,10 @@ import com.start.agent.model.NovelCharacterState;
 import com.start.agent.model.NovelWritePhase;
 import com.start.agent.model.WritingPipeline;
 import com.start.agent.repository.ChapterFactRepository;
+import com.start.agent.repository.ChapterRevisionRepository;
+import com.start.agent.repository.OutlineRevisionRepository;
 import com.start.agent.repository.CharacterProfileRepository;
+import com.start.agent.repository.CharacterProfileRevisionRepository;
 import com.start.agent.repository.ConsistencyAlertRepository;
 import com.start.agent.repository.GenerationLogRepository;
 import com.start.agent.repository.GenerationTaskRepository;
@@ -38,6 +44,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 /**
  * HTTP API：小说 CRUD、开书/续写/自动续写、重生、导出、进度与监控、流水线切换等。
@@ -64,6 +72,22 @@ public class NovelManagementController {
     @Autowired private NovelDeletionService novelDeletionService;
     @Autowired private NovelLibraryAccessService novelLibraryAccessService;
     @Autowired private CharacterNarrativeStateService characterNarrativeStateService;
+    @Autowired private ChapterRevisionRepository chapterRevisionRepository;
+    @Autowired private OutlineRevisionRepository outlineRevisionRepository;
+    @Autowired private CharacterProfileRevisionRepository characterProfileRevisionRepository;
+    @Autowired private com.start.agent.repository.ChapterRepository chapterRepository;
+    @Autowired private com.start.agent.service.StrandWeaveService strandWeaveService;
+    @Autowired private com.start.agent.service.ForeshadowingService foreshadowingService;
+    @Autowired private com.start.agent.service.ReadingPowerService readingPowerService;
+    @Autowired private com.start.agent.service.StoryContractService storyContractService;
+    @Autowired private com.start.agent.service.ChapterCommitService chapterCommitService;
+    @Autowired private com.start.agent.service.StructuredOutlineService structuredOutlineService;
+    @Autowired private com.start.agent.service.AiFlavorDetector aiFlavorDetector;
+    @Autowired private com.start.agent.service.WritingKnowledgeService writingKnowledgeService;
+    @Autowired private com.start.agent.repository.ForeshadowingRepository foreshadowingRepository;
+    @Autowired private com.start.agent.repository.ChapterReadingPowerRepository chapterReadingPowerRepository;
+    @Autowired private com.start.agent.repository.StoryContractRepository storyContractRepository;
+    @Autowired @Qualifier("generationExecutor") private Executor generationExecutor;
 
     private void guardRead(Long novelId) {
         novelLibraryAccessService.assertCanRead(novelId);
@@ -87,6 +111,234 @@ public class NovelManagementController {
         return agentService.getChaptersByNovelId(novelId);
     }
 
+    // ── 章节版本管理 ──
+
+    /** 更新章节内容（手动编辑）。自动将旧内容存档为 revision，返回新版本号。 */
+    @PutMapping("/{novelId}/chapters/{chapterNumber}/content")
+    public Map<String, Object> updateChapterContent(@PathVariable Long novelId, @PathVariable int chapterNumber,
+                                                    @RequestBody UpdateContentRequest request) {
+        guardRead(novelId);
+        Chapter chapter = chapterRepository.findByNovelIdAndChapterNumber(novelId, chapterNumber)
+                .orElseThrow(() -> new NotFoundException("未找到该章节"));
+        // 存档旧版本
+        int nextRev = chapterRevisionRepository.countByNovelIdAndChapterNumber(novelId, chapterNumber) + 1;
+        ChapterRevision rev = new ChapterRevision(novelId, chapterNumber, nextRev,
+                chapter.getContent(), chapter.getTitle(), request.getEditNote());
+        chapterRevisionRepository.save(rev);
+        // 写入新内容
+        chapter.setContent(request.getContent());
+        if (request.getTitle() != null && !request.getTitle().isBlank()) {
+            chapter.setTitle(request.getTitle().trim());
+        }
+        chapterRepository.save(chapter);
+        log.info("【版本管理】小说 {} 第 {} 章手动编辑，旧版存档为 revision {}，编辑备注: {}",
+                novelId, chapterNumber, nextRev, request.getEditNote());
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success");
+        data.put("code", "OK");
+        data.put("revisionNumber", nextRev);
+        data.put("message", "内容已更新，旧版已存档为 revision " + nextRev);
+        return data;
+    }
+
+    /** 获取某章的全部历史版本列表（倒序，最新在前）。 */
+    @GetMapping("/{novelId}/chapters/{chapterNumber}/revisions")
+    public List<Map<String, Object>> listRevisions(@PathVariable Long novelId, @PathVariable int chapterNumber) {
+        guardRead(novelId);
+        return chapterRevisionRepository.findByNovelIdAndChapterNumberOrderByRevisionNumberDesc(novelId, chapterNumber)
+                .stream().map(r -> {
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("id", r.getId());
+                    m.put("revisionNumber", r.getRevisionNumber());
+                    m.put("title", r.getTitle());
+                    m.put("contentLength", r.getContent() == null ? 0 : r.getContent().length());
+                    m.put("editNote", r.getEditNote());
+                    m.put("createTime", r.getCreateTime());
+                    return m;
+                }).collect(Collectors.toList());
+    }
+
+    /** 获取某个版本的完整内容。 */
+    @GetMapping("/{novelId}/chapters/{chapterNumber}/revisions/{revisionId}")
+    public ChapterRevision getRevision(@PathVariable Long novelId, @PathVariable int chapterNumber,
+                                       @PathVariable Long revisionId) {
+        guardRead(novelId);
+        return chapterRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId) && r.getChapterNumber().equals(chapterNumber))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+    }
+
+    /** 回滚到指定版本（自动将当前内容存档后再恢复）。 */
+    @PostMapping("/{novelId}/chapters/{chapterNumber}/revisions/{revisionId}/restore")
+    public Map<String, Object> restoreRevision(@PathVariable Long novelId, @PathVariable int chapterNumber,
+                                               @PathVariable Long revisionId) {
+        guardRead(novelId);
+        ChapterRevision targetRev = chapterRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId) && r.getChapterNumber().equals(chapterNumber))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+        Chapter chapter = chapterRepository.findByNovelIdAndChapterNumber(novelId, chapterNumber)
+                .orElseThrow(() -> new NotFoundException("未找到该章节"));
+        // 存档当前内容
+        int nextRev = chapterRevisionRepository.countByNovelIdAndChapterNumber(novelId, chapterNumber) + 1;
+        ChapterRevision currentRev = new ChapterRevision(novelId, chapterNumber, nextRev,
+                chapter.getContent(), chapter.getTitle(), "回滚到 revision " + targetRev.getRevisionNumber() + " 前的自动存档");
+        chapterRevisionRepository.save(currentRev);
+        // 恢复目标版本
+        chapter.setContent(targetRev.getContent());
+        if (targetRev.getTitle() != null && !targetRev.getTitle().isBlank()) {
+            chapter.setTitle(targetRev.getTitle());
+        }
+        chapterRepository.save(chapter);
+        log.info("【版本管理】小说 {} 第 {} 章回滚到 revision {}（当前内容存档为 revision {}）",
+                novelId, chapterNumber, targetRev.getRevisionNumber(), nextRev);
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success");
+        data.put("code", "OK");
+        data.put("restoredFromRevision", targetRev.getRevisionNumber());
+        data.put("previousSavedAsRevision", nextRev);
+        data.put("message", "已回滚到 revision " + targetRev.getRevisionNumber());
+        return data;
+    }
+
+    // ── 大纲版本管理 ──
+
+    @PutMapping("/{novelId}/outline/content")
+    public Map<String, Object> updateOutlineContent(@PathVariable Long novelId, @RequestBody UpdateContentRequest request) {
+        guardRead(novelId);
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new NotFoundException("未找到该小说"));
+        int nextRev = outlineRevisionRepository.countByNovelId(novelId) + 1;
+        OutlineRevision rev = new OutlineRevision(novelId, nextRev, novel.getDescription(), request.getEditNote());
+        outlineRevisionRepository.save(rev);
+        novel.setDescription(request.getContent());
+        novelRepository.save(novel);
+        log.info("【版本管理】小说 {} 大纲手动编辑，旧版存档为 revision {}", novelId, nextRev);
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success"); data.put("code", "OK");
+        data.put("revisionNumber", nextRev);
+        data.put("message", "大纲已更新，旧版已存档为 revision " + nextRev);
+        return data;
+    }
+
+    @GetMapping("/{novelId}/outline/revisions")
+    public List<Map<String, Object>> listOutlineRevisions(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return outlineRevisionRepository.findByNovelIdOrderByRevisionNumberDesc(novelId).stream().map(r -> {
+            Map<String, Object> m = new HashMap<>();
+            m.put("id", r.getId()); m.put("revisionNumber", r.getRevisionNumber());
+            m.put("contentLength", r.getContent() == null ? 0 : r.getContent().length());
+            m.put("editNote", r.getEditNote()); m.put("createTime", r.getCreateTime());
+            return m;
+        }).collect(Collectors.toList());
+    }
+
+    @GetMapping("/{novelId}/outline/revisions/{revisionId}")
+    public OutlineRevision getOutlineRevision(@PathVariable Long novelId, @PathVariable Long revisionId) {
+        guardRead(novelId);
+        return outlineRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+    }
+
+    @PostMapping("/{novelId}/outline/revisions/{revisionId}/restore")
+    public Map<String, Object> restoreOutlineRevision(@PathVariable Long novelId, @PathVariable Long revisionId) {
+        guardRead(novelId);
+        OutlineRevision targetRev = outlineRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+        Novel novel = novelRepository.findById(novelId).orElseThrow(() -> new NotFoundException("未找到该小说"));
+        int nextRev = outlineRevisionRepository.countByNovelId(novelId) + 1;
+        outlineRevisionRepository.save(new OutlineRevision(novelId, nextRev, novel.getDescription(),
+                "回滚到 revision " + targetRev.getRevisionNumber() + " 前的自动存档"));
+        novel.setDescription(targetRev.getContent());
+        novelRepository.save(novel);
+        log.info("【版本管理】小说 {} 大纲回滚到 revision {}", novelId, targetRev.getRevisionNumber());
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success"); data.put("code", "OK");
+        data.put("restoredFromRevision", targetRev.getRevisionNumber());
+        data.put("previousSavedAsRevision", nextRev);
+        data.put("message", "大纲已回滚到 revision " + targetRev.getRevisionNumber());
+        return data;
+    }
+
+    // ── 角色设定版本管理 ──
+
+    @PutMapping("/{novelId}/characters/{characterId}/content")
+    public Map<String, Object> updateCharacterProfileContent(@PathVariable Long novelId, @PathVariable Long characterId,
+                                                              @RequestBody UpdateContentRequest request) {
+        guardRead(novelId);
+        CharacterProfile cp = characterProfileRepository.findById(characterId)
+                .filter(c -> c.getNovelId().equals(novelId))
+                .orElseThrow(() -> new NotFoundException("未找到该角色"));
+        int nextRev = characterProfileRevisionRepository.countByNovelIdAndCharacterProfileId(novelId, characterId) + 1;
+        CharacterProfileRevision rev = new CharacterProfileRevision(novelId, characterId, nextRev,
+                cp.getCharacterName(), cp.getProfileContent(), request.getEditNote());
+        characterProfileRevisionRepository.save(rev);
+        cp.setProfileContent(request.getContent());
+        if (request.getTitle() != null && !request.getTitle().isBlank()) {
+            cp.setCharacterName(request.getTitle().trim());
+        }
+        characterProfileRepository.save(cp);
+        log.info("【版本管理】小说 {} 角色 {} 手动编辑，旧版存档为 revision {}", novelId, cp.getCharacterName(), nextRev);
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success"); data.put("code", "OK");
+        data.put("revisionNumber", nextRev);
+        data.put("message", "角色设定已更新，旧版已存档为 revision " + nextRev);
+        return data;
+    }
+
+    @GetMapping("/{novelId}/characters/{characterId}/revisions")
+    public List<Map<String, Object>> listCharacterProfileRevisions(@PathVariable Long novelId, @PathVariable Long characterId) {
+        guardRead(novelId);
+        return characterProfileRevisionRepository.findByNovelIdAndCharacterProfileIdOrderByRevisionNumberDesc(novelId, characterId)
+                .stream().map(r -> {
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("id", r.getId()); m.put("revisionNumber", r.getRevisionNumber());
+                    m.put("characterName", r.getCharacterName());
+                    m.put("contentLength", r.getContent() == null ? 0 : r.getContent().length());
+                    m.put("editNote", r.getEditNote()); m.put("createTime", r.getCreateTime());
+                    return m;
+                }).collect(Collectors.toList());
+    }
+
+    @GetMapping("/{novelId}/characters/{characterId}/revisions/{revisionId}")
+    public CharacterProfileRevision getCharacterProfileRevision(@PathVariable Long novelId, @PathVariable Long characterId,
+                                                                 @PathVariable Long revisionId) {
+        guardRead(novelId);
+        return characterProfileRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId) && r.getCharacterProfileId().equals(characterId))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+    }
+
+    @PostMapping("/{novelId}/characters/{characterId}/revisions/{revisionId}/restore")
+    public Map<String, Object> restoreCharacterProfileRevision(@PathVariable Long novelId, @PathVariable Long characterId,
+                                                                @PathVariable Long revisionId) {
+        guardRead(novelId);
+        CharacterProfileRevision targetRev = characterProfileRevisionRepository.findById(revisionId)
+                .filter(r -> r.getNovelId().equals(novelId) && r.getCharacterProfileId().equals(characterId))
+                .orElseThrow(() -> new NotFoundException("未找到该版本"));
+        CharacterProfile cp = characterProfileRepository.findById(characterId)
+                .filter(c -> c.getNovelId().equals(novelId))
+                .orElseThrow(() -> new NotFoundException("未找到该角色"));
+        int nextRev = characterProfileRevisionRepository.countByNovelIdAndCharacterProfileId(novelId, characterId) + 1;
+        characterProfileRevisionRepository.save(new CharacterProfileRevision(novelId, characterId, nextRev,
+                cp.getCharacterName(), cp.getProfileContent(),
+                "回滚到 revision " + targetRev.getRevisionNumber() + " 前的自动存档"));
+        cp.setProfileContent(targetRev.getContent());
+        if (targetRev.getCharacterName() != null && !targetRev.getCharacterName().isBlank()) {
+            cp.setCharacterName(targetRev.getCharacterName());
+        }
+        characterProfileRepository.save(cp);
+        log.info("【版本管理】小说 {} 角色 {} 回滚到 revision {}", novelId, cp.getCharacterName(), targetRev.getRevisionNumber());
+        Map<String, Object> data = new HashMap<>();
+        data.put("status", "success"); data.put("code", "OK");
+        data.put("restoredFromRevision", targetRev.getRevisionNumber());
+        data.put("previousSavedAsRevision", nextRev);
+        data.put("message", "角色设定已回滚到 revision " + targetRev.getRevisionNumber());
+        return data;
+    }
+
+    // ── 原有接口 ──
+
     @GetMapping("/{novelId}")
     public Novel getNovel(@PathVariable Long novelId) {
         guardRead(novelId);
@@ -100,6 +352,7 @@ public class NovelManagementController {
     @GetMapping("/{novelId}/delete-guard")
     public Map<String, Object> deleteGuard(@PathVariable Long novelId) {
         guardRead(novelId);
+        novelLibraryAccessService.assertCanDelete(novelId);
         Novel n = novelRepository.findById(novelId).orElseThrow(NotFoundException::novel);
         int activeTasks = generationTaskRepository.findByNovelIdAndStatusInOrderByCreateTimeAsc(novelId, ACTIVE_TASK_STATUSES).size();
         Map<String, Object> data = new HashMap<>();
@@ -117,6 +370,7 @@ public class NovelManagementController {
     @PostMapping("/{novelId}/delete")
     public Map<String, Object> deleteNovel(@PathVariable Long novelId, @RequestBody(required = false) DeleteNovelRequest req) {
         guardRead(novelId);
+        novelLibraryAccessService.assertCanDelete(novelId);
         try {
             novelDeletionService.deleteNovelPermanently(
                     novelId,
@@ -311,7 +565,7 @@ public class NovelManagementController {
             NovelAgentService.RebuildMode mode = NovelAgentService.RebuildMode.from(rebuildMode);
             NovelAgentService.CharacterRepairOptions options =
                     new NovelAgentService.CharacterRepairOptions(forceRegenerate, mode, characterContextHint, targetCharacterNames, extraHint);
-            CompletableFuture.runAsync(() -> agentService.repairCharacterProfiles(0L, novelId.intValue(), options));
+            CompletableFuture.runAsync(() -> agentService.repairCharacterProfiles(0L, novelId.intValue(), options), generationExecutor);
             Map<String, Object> data = new HashMap<>();
             data.put("forceRegenerate", forceRegenerate);
             data.put("rebuildMode", mode.name().toLowerCase());
@@ -654,7 +908,8 @@ public class NovelManagementController {
             if (request.getWritingStyleParams() != null && !request.getWritingStyleParams().isEmpty()) {
                 styleJson = objectMapper.writeValueAsString(request.getWritingStyleParams());
             }
-            Novel novel = agentService.createNovel(0L, request.getTopic(), request.getGenerationSetting(), WritingPipeline.POWER_FANTASY, hotMeme, styleJson,
+            Long userId = novelLibraryAccessService.getCurrentUserId();
+            Novel novel = agentService.createNovel(userId == null ? 0L : userId, request.getTopic(), request.getGenerationSetting(), WritingPipeline.POWER_FANTASY, hotMeme, styleJson,
                     request.getSerializationPlatform(), request.getCreatorNote(),
                     request.getOutlineDetailedPrefixChapters(), request.getOutlineMinRoadmapChapters());
             GenerationTask task = generationTaskService.enqueueInitialBootstrapTask(novel.getId(), 5);
@@ -793,20 +1048,119 @@ public class NovelManagementController {
     }
     private int textLength(String text) { return text == null ? 0 : text.length(); }
     private Map<String, Object> success(String message, Map<String, Object> data) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("status", "success");
-        result.put("code", "OK");
-        result.put("message", message);
-        if (data != null) result.putAll(data);
-        return result;
+        return ApiResponse.success(message, data).toMap();
     }
 
     private Map<String, Object> error(String code, String message) {
+        return ApiResponse.error(code, message).toMap();
+    }
+
+    // ──── 新增 API (Phase 3.2) ────
+
+    @GetMapping("/{novelId}/contracts")
+    public Map<String, Object> getContractTree(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return storyContractService.getContractTree(novelId);
+    }
+
+    @GetMapping("/{novelId}/strand-stats")
+    public Map<String, Object> strandStats(@PathVariable Long novelId) {
+        guardRead(novelId);
+        var stats = strandWeaveService.getStrandStats(novelId);
         Map<String, Object> result = new HashMap<>();
-        result.put("status", "error");
-        result.put("code", code);
-        result.put("message", message);
+        result.put("questCount", stats.questCount());
+        result.put("fireCount", stats.fireCount());
+        result.put("constellationCount", stats.constellationCount());
+        result.put("lastQuestChapter", stats.lastQuestChapter());
+        result.put("lastFireChapter", stats.lastFireChapter());
+        result.put("lastConstellationChapter", stats.lastConstellationChapter());
+        result.put("currentDominant", stats.currentDominant() != null ? stats.currentDominant().name() : null);
+        result.put("chaptersSinceSwitch", stats.chaptersSinceSwitch());
+        result.put("suggestion", stats.suggestion());
+        result.put("warning", stats.warning());
         return result;
+    }
+
+    @GetMapping("/{novelId}/foreshadowing")
+    public List<com.start.agent.model.Foreshadowing> listForeshadowing(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return foreshadowingRepository.findByNovelIdOrderByPlantedChapterAsc(novelId);
+    }
+
+    @GetMapping("/{novelId}/foreshadowing/gantt")
+    public List<Map<String, Object>> foreshadowingGantt(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return foreshadowingService.getGanttData(novelId);
+    }
+
+    @PostMapping("/{novelId}/foreshadowing")
+    public Map<String, Object> addForeshadowing(@PathVariable Long novelId, @RequestBody Map<String, Object> body) {
+        guardRead(novelId);
+        String content = (String) body.getOrDefault("content", "");
+        String loopType = (String) body.getOrDefault("loopType", "MYSTERY");
+        String urgency = (String) body.getOrDefault("urgency", "low");
+        Integer plantedChapter = body.get("plantedChapter") instanceof Number n ? n.intValue() : 1;
+        Integer deadlineChapter = body.get("deadlineChapter") instanceof Number n ? n.intValue() : null;
+        var f = foreshadowingService.plantLoop(novelId, plantedChapter, content, loopType, urgency, deadlineChapter);
+        Map<String, Object> result = new HashMap<>();
+        result.put("id", f.getId());
+        result.put("status", "success");
+        return result;
+    }
+
+    @PutMapping("/{novelId}/foreshadowing/{fid}")
+    public Map<String, Object> updateForeshadowing(@PathVariable Long novelId, @PathVariable Long fid,
+                                                    @RequestBody Map<String, Object> body) {
+        guardRead(novelId);
+        String action = (String) body.getOrDefault("action", "remind");
+        Integer chapterNumber = body.get("chapterNumber") instanceof Number n ? n.intValue() : null;
+        if ("payoff".equals(action) && chapterNumber != null) {
+            foreshadowingService.payoffLoop(fid, chapterNumber);
+        } else if (chapterNumber != null) {
+            foreshadowingService.remindLoop(fid, chapterNumber);
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("status", "success");
+        return result;
+    }
+
+    @GetMapping("/{novelId}/reading-power")
+    public List<Map<String, Object>> readingPowerMetrics(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return readingPowerService.getChapterMetrics(novelId);
+    }
+
+    @GetMapping("/{novelId}/reading-power/trend")
+    public List<Map<String, Object>> readingPowerTrend(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return readingPowerService.getChapterMetrics(novelId);
+    }
+
+    @GetMapping("/{novelId}/chapters/{n}/ai-flavor-report")
+    public Map<String, Object> aiFlavorReport(@PathVariable Long novelId, @PathVariable Integer n) {
+        guardRead(novelId);
+        var chapter = chapterRepository.findByNovelIdAndChapterNumber(novelId, n).orElse(null);
+        if (chapter == null || chapter.getContent() == null) {
+            return Map.of("issues", List.of(), "summary", "章节不存在或内容为空", "passed", true);
+        }
+        return aiFlavorDetector.buildReport(chapter.getContent());
+    }
+
+    @GetMapping("/{novelId}/commit-history")
+    public List<Map<String, Object>> commitHistory(@PathVariable Long novelId) {
+        guardRead(novelId);
+        return chapterCommitService.getCommitHistory(novelId);
+    }
+
+    @GetMapping("/knowledge/search")
+    public List<Map<String, Object>> searchKnowledge(@RequestParam(required = false) String table,
+                                                      @RequestParam String query) {
+        return writingKnowledgeService.search(table, query);
+    }
+
+    @GetMapping("/knowledge/tables")
+    public List<String> knowledgeTables() {
+        return List.of("题材与调性推理", "裁决规则", "人设与关系", "写作技法", "命名规则", "场景写法", "桥段套路", "爽点与节奏", "金手指与设定");
     }
 
     @Data static class CreateRequest {
@@ -867,6 +1221,7 @@ public class NovelManagementController {
     @Data static class HotMemeRequest {
         private Boolean enabled;
     }
+    @Data static class UpdateContentRequest { private String content; private String title; private String editNote; }
     @Data static class ContinueRequest { private Integer chapterNumber; private String generationSetting; }
     @Data static class AutoContinueRequest { private Integer targetChapterCount; private String generationSetting; }
     @Data static class RegenerateRequest { private String generationSetting; }

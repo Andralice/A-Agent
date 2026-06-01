@@ -49,10 +49,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (username == null || username.isBlank()) {
             return;
         }
+        String role = JwtService.getRole(claims);
+        String authority = "ADMIN".equals(role) ? "ROLE_ADMIN" : "ROLE_USER";
         UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(
-                username,
+                claims,  // 存 Claims 以便后续提取 userId/role
                 null,
-                List.of(new SimpleGrantedAuthority("ROLE_ADMIN")));
+                List.of(new SimpleGrantedAuthority(authority)));
         SecurityContextHolder.getContext().setAuthentication(auth);
     }
 }

@@ -4,6 +4,7 @@ package com.start.agent.agent;
 import com.start.agent.prompt.NarrativeCraftPrompts;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -14,6 +15,10 @@ import org.springframework.stereotype.Component;
 public class ConsistencyReviewAgent {
 
     private final ChatClient chatClient;
+
+    /** 审查结果低于输入字符数的比例时视为模型未返回正文，退回原文。 */
+    @Value("${novel.llm.review-min-length-ratio:0.5}")
+    private double reviewMinLengthRatio;
 
     public ConsistencyReviewAgent(ChatClient.Builder chatClientBuilder) {
         this.chatClient = chatClientBuilder.build();
@@ -106,7 +111,7 @@ public class ConsistencyReviewAgent {
             4. 不要扼杀有价值的创新
             
             【要求】
-            1. 如果内容完全符合要求，直接返回原文
+            1. 如果内容完全符合要求，直接返回原文的**完整正文**（不要只写「内容符合要求」，必须把原文一字不差地返回）
             2. 如果有需要修改的地方，返回修正后的完整内容
             3. 保持原文的风格、节奏和字数
             4. 不要添加任何说明或注释
@@ -123,7 +128,16 @@ public class ConsistencyReviewAgent {
         try {
             String result = chatClient.prompt(prompt).call().content();
             long elapsed = System.currentTimeMillis() - startTime;
-            log.info("【🔍 一致性审查】✅ 审查完成 - 耗时: {}ms, 结果长度: {} 字符", elapsed, result.length());
+            int inputLen = content == null ? 0 : content.length();
+            int resultLen = result == null ? 0 : result.length();
+            double ratio = inputLen > 0 ? (double) resultLen / inputLen : 0;
+            double minRatio = Math.max(0.2, Math.min(0.9, reviewMinLengthRatio));
+            if (resultLen > 0 && ratio < minRatio) {
+                log.warn("【🔍 一致性审查】⚠️ 模型疑似仅返回评语而未返回正文，退回原文 — 输入 {} 字符，结果 {} 字符（比例 {:.2f} < {:.2f}）",
+                        inputLen, resultLen, ratio, minRatio);
+                return content;
+            }
+            log.info("【🔍 一致性审查】✅ 审查完成 - 耗时: {}ms, 结果长度: {} 字符", elapsed, resultLen);
             return result;
         } catch (Exception e) {
             long elapsed = System.currentTimeMillis() - startTime;

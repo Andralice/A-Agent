@@ -11,6 +11,8 @@ import java.util.List;
 @Repository
 public interface NovelRepository extends JpaRepository<Novel, Long> {
     List<Novel> findByLibraryPublicTrueOrderByCreateTimeDesc();
+    @Query("SELECT n FROM Novel n WHERE n.userId = :userId OR n.libraryPublic = true ORDER BY n.createTime DESC")
+    List<Novel> findByUserIdOrLibraryPublicTrueOrderByCreateTimeDesc(Long userId);
 
     List<Novel> findByGroupId(Long groupId);
     List<Novel> findByUserIdAndGroupId(Long userId, Long groupId);

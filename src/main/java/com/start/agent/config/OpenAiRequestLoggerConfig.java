@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 
 /** 可选的 AI HTTP 请求日志 RestClient 装饰（便于排查模型调用，默认关闭）。 */
 @Slf4j
-@Configuration
+@Configuration(proxyBeanMethods = false)
 public class OpenAiRequestLoggerConfig {
 
     @Value("${app.ai-request-log.enabled:false}")

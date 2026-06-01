@@ -92,6 +92,20 @@ public class Novel {
     private LocalDateTime updateTime;
 
     /**
+     * 三股线追踪器 JSON：{@code {lastQuestChapter, lastFireChapter, lastConstellationChapter, currentDominant, chaptersSinceSwitch}}。
+     * 每章落库后由 {@code StrandWeaveService} 更新。
+     */
+    @Column(name = "strand_tracker_json", columnDefinition = "TEXT")
+    private String strandTrackerJson;
+
+    /**
+     * CBN/CPN/CEN 结构化大纲 JSON：每章包含起点节点、推进节点列表、终点节点、必须覆盖节点、本章禁区。
+     * 在大纲生成/重新生成时由 LLM 产出，供写前上下文组装消费。
+     */
+    @Column(name = "structured_outline_json", columnDefinition = "TEXT")
+    private String structuredOutlineJson;
+
+    /**
      * M4：上一章成功落库后写入的「下一章开篇承接提示」（衔接锚点 + 尾声摘录等）；生成下一章初稿时注入。
      * 关闭 {@code novel.narrative-engine.m4-carryover-enabled} 时不更新、不注入。
      */
